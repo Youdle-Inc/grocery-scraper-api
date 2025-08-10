@@ -5,6 +5,7 @@ Core scraper functionality
 import time
 import random
 import logging
+import os
 from typing import List, Dict, Any
 from urllib.parse import quote
 from datetime import datetime
