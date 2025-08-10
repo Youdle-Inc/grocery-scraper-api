@@ -1,12 +1,11 @@
 # Grocery Scraper API
 
-A professional FastAPI service for scraping real grocery store product data using Selenium.
+A FastAPI service for scraping real grocery store product data using Selenium.
 
 ## 🚀 Features
 
 - **Real Data Scraping** - Uses Selenium to scrape actual grocery websites
 - **Multiple Stores** - Supports Giant Eagle, Wegmans, ALDI, Albertsons, ShopRite
-- **Professional API** - FastAPI with automatic OpenAPI documentation
 - **Production Ready** - Docker support, health checks, error handling
 - **Type Safe** - Full Pydantic model validation
 
