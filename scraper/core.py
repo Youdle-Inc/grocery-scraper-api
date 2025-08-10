@@ -216,7 +216,7 @@ Rules:
         """Clean up common JSON formatting issues in LLM responses"""
         # Extract JSON from markdown code blocks if present
         json_match = re.search(r'(?:json)?\s*(\{.*\})\s*
-', response, re.DOTALL)
+    ', response, re.DOTALL)
         if json_match:
             response = json_match.group(1)
         
