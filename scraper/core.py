@@ -74,9 +74,17 @@ class GroceryScraper:
             chrome_options.add_argument("--disable-plugins")
             chrome_options.add_argument("--disable-images")
             chrome_options.add_argument(f"--user-agent={SCRAPER_CONFIG['user_agent']}")
+            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            chrome_options.add_experimental_option('useAutomationExtension', False)
             
-            # Setup service
-            service = Service(ChromeDriverManager().install())
+            # Use pre-installed ChromeDriver instead of WebDriver Manager
+            chromedriver_path = os.environ.get('CHROMEDRIVER_PATH', '/usr/local/bin/chromedriver')
+            
+            if os.path.exists(chromedriver_path):
+                service = Service(chromedriver_path)
+            else:
+                # Fallback to WebDriver Manager
+                service = Service(ChromeDriverManager().install())
             
             # Create driver
             driver = webdriver.Chrome(service=service, options=chrome_options)
