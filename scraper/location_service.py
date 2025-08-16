@@ -22,7 +22,7 @@ class LocationService:
         self.store_coverage = self._initialize_store_coverage()
         
         # Initialize Perplexity Sonar client
-        api_key = os.environ.get("PERPLEXITY_API_KEY", "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")
+        api_key = os.environ.get("PERPLEXITY_API_KEY")
         self.sonar_client = SonarClient(api_key)
         
     def _initialize_store_coverage(self) -> Dict[str, List[str]]:
