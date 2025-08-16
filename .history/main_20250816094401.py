@@ -20,35 +20,6 @@ from scraper.sonar_client import SonarClient
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Helper functions for address parsing
-def extract_city_from_address(address: str) -> Optional[str]:
-    """Extract city from address string"""
-    if not address:
-        return None
-    
-    # Look for city pattern: "City, State ZIP"
-    import re
-    city_pattern = r'([^,]+),\s*([A-Z]{2})\s+\d{5}'
-    match = re.search(city_pattern, address)
-    if match:
-        return match.group(1).strip()
-    
-    return None
-
-def extract_state_from_address(address: str) -> Optional[str]:
-    """Extract state from address string"""
-    if not address:
-        return None
-    
-    # Look for state pattern: "City, State ZIP"
-    import re
-    state_pattern = r'([^,]+),\s*([A-Z]{2})\s+\d{5}'
-    match = re.search(state_pattern, address)
-    if match:
-        return match.group(2).strip()
-    
-    return None
-
 # Create FastAPI app
 app = FastAPI(
     title="Grocery Scraper API",
@@ -165,8 +136,8 @@ async def get_sonar_stores(zipcode: str):
                     "website": getattr(store, 'website', None),
                     "location": {
                         "zipcode": store.zipcode,
-                        "city": extract_city_from_address(store.address) if store.address else None,
-                        "state": extract_state_from_address(store.address) if store.address else None
+                        "city": self._extract_city_from_address(store.address) if store.address else None,
+                        "state": self._extract_state_from_address(store.address) if store.address else None
                     }
                 }
                 for store in stores
@@ -180,8 +151,6 @@ async def get_sonar_stores(zipcode: str):
             status_code=500,
             detail=f"Sonar search failed: {str(e)}"
         )
-    
-
 
 @app.get("/sonar/store/{store_name}/details")
 async def get_sonar_store_details(store_name: str, location: str):
@@ -223,21 +192,8 @@ async def search_sonar_products(query: str, store_name: str, location: str):
             "store_name": store_name,
             "location": location,
             "products_found": len(products),
-            "search_timestamp": datetime.now().isoformat(),
-            "products": [
-                {
-                    "name": product.get("name", "Unknown Product"),
-                    "price": product.get("price"),
-                    "availability": product.get("availability", "Unknown"),
-                    "category": product.get("category"),
-                    "brand": product.get("brand"),
-                    "size": product.get("size"),
-                    "description": product.get("description")
-                }
-                for product in products
-            ],
-            "source": "perplexity_sonar",
-            "api_version": "1.0.0"
+            "products": products,
+            "source": "perplexity_sonar"
         }
     except Exception as e:
         logger.error(f"❌ Sonar product search failed: {e}")

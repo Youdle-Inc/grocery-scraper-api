@@ -223,21 +223,8 @@ async def search_sonar_products(query: str, store_name: str, location: str):
             "store_name": store_name,
             "location": location,
             "products_found": len(products),
-            "search_timestamp": datetime.now().isoformat(),
-            "products": [
-                {
-                    "name": product.get("name", "Unknown Product"),
-                    "price": product.get("price"),
-                    "availability": product.get("availability", "Unknown"),
-                    "category": product.get("category"),
-                    "brand": product.get("brand"),
-                    "size": product.get("size"),
-                    "description": product.get("description")
-                }
-                for product in products
-            ],
-            "source": "perplexity_sonar",
-            "api_version": "1.0.0"
+            "products": products,
+            "source": "perplexity_sonar"
         }
     except Exception as e:
         logger.error(f"❌ Sonar product search failed: {e}")

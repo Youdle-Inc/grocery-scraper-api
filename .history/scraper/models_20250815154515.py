@@ -45,7 +45,6 @@ class StoreLocation(BaseModel):
     state: Optional[str] = None
     zipcode: Optional[str] = None
     phone: Optional[str] = None
-    website: Optional[str] = None
     hours: Optional[Dict[str, str]] = None
     services: Optional[List[str]] = None  # delivery, pickup, etc.
     status: str = "active"

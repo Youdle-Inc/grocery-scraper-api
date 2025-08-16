@@ -6,6 +6,7 @@ A professional FastAPI service for scraping grocery store product data
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from typing import List, Optional
 import asyncio
 import os
@@ -19,35 +20,6 @@ from scraper.sonar_client import SonarClient
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Helper functions for address parsing
-def extract_city_from_address(address: str) -> Optional[str]:
-    """Extract city from address string"""
-    if not address:
-        return None
-    
-    # Look for city pattern: "City, State ZIP"
-    import re
-    city_pattern = r'([^,]+),\s*([A-Z]{2})\s+\d{5}'
-    match = re.search(city_pattern, address)
-    if match:
-        return match.group(1).strip()
-    
-    return None
-
-def extract_state_from_address(address: str) -> Optional[str]:
-    """Extract state from address string"""
-    if not address:
-        return None
-    
-    # Look for state pattern: "City, State ZIP"
-    import re
-    state_pattern = r'([^,]+),\s*([A-Z]{2})\s+\d{5}'
-    match = re.search(state_pattern, address)
-    if match:
-        return match.group(2).strip()
-    
-    return None
 
 # Create FastAPI app
 app = FastAPI(
@@ -110,13 +82,81 @@ async def health_check():
 
 
 
+# Enhanced location-based search endpoints
+@app.post("/search/location", response_model=LocationSearchResponse)
+async def search_by_location(query: LocationQuery):
+    """
+    Search for products across multiple stores in a location
+    
+    - **query**: Product search term (e.g., "almond milk", "organic bread")
+    - **zipcode**: ZIP code for location
+    - **radius_miles**: Search radius in miles (default: 10)
+    - **max_results**: Maximum number of results (default: 20)
+    - **include_alternatives**: Include alternative products (default: true)
+    - **min_confidence**: Minimum confidence score (default: 0.5)
+    """
+    return await enhanced_scraper.search_by_location(query)
 
+@app.get("/search/location")
+async def search_by_location_get(
+    query: str, 
+    zipcode: str, 
+    radius_miles: int = 10,
+    max_results: int = 20,
+    include_alternatives: bool = True,
+    min_confidence: float = 0.5
+):
+    """GET version of location-based search for easy testing"""
+    location_query = LocationQuery(
+        query=query,
+        zipcode=zipcode,
+        radius_miles=radius_miles,
+        max_results=max_results,
+        include_alternatives=include_alternatives,
+        min_confidence=min_confidence
+    )
+    return await enhanced_scraper.search_by_location(location_query)
+
+@app.get("/coverage")
+async def get_store_coverage():
+    """Get store coverage information by zipcode ranges"""
+    return enhanced_scraper.get_store_coverage()
+
+@app.get("/suggest")
+async def suggest_queries(partial: str):
+    """Get query suggestions based on partial input"""
+    suggestions = enhanced_scraper.suggest_queries(partial)
+    return {
+        "partial": partial,
+        "suggestions": suggestions,
+        "count": len(suggestions)
+    }
+
+@app.get("/synonyms/{query}")
+async def get_product_synonyms(query: str):
+    """Get synonyms and alternatives for a product query"""
+    synonyms = enhanced_scraper.get_product_synonyms(query)
+    return {
+        "query": query,
+        "synonyms": synonyms,
+        "count": len(synonyms)
+    }
+
+@app.get("/services/{store_id}")
+async def get_store_services(store_id: str):
+    """Get available services for a store (delivery, pickup, etc.)"""
+    services = enhanced_scraper.get_store_services(store_id)
+    return {
+        "store_id": store_id,
+        "services": services,
+        "count": len(services)
+    }
 
 @app.get("/sonar/test/{zipcode}")
 async def test_sonar(zipcode: str):
     """Test Perplexity Sonar store discovery for a zipcode"""
     try:
-        stores = await sonar_client.search_stores(zipcode)
+        stores = await enhanced_scraper.location_service.get_stores_for_zipcode(zipcode)
         return {
             "zipcode": zipcode,
             "stores_found": len(stores),
@@ -130,19 +170,20 @@ async def test_sonar(zipcode: str):
                 }
                 for store in stores
             ],
-            "sonar_available": sonar_client.is_available()
+            "sonar_available": enhanced_scraper.location_service.sonar_client.is_available()
         }
     except Exception as e:
         return {
             "zipcode": zipcode,
             "error": str(e),
-            "sonar_available": sonar_client.is_available()
+            "sonar_available": enhanced_scraper.location_service.sonar_client.is_available()
         }
 
 @app.get("/sonar/stores/{zipcode}")
 async def get_sonar_stores(zipcode: str):
     """Get stores discovered via Perplexity Sonar for a zipcode"""
     try:
+        sonar_client = enhanced_scraper.location_service.sonar_client
         if not sonar_client.is_available():
             raise HTTPException(
                 status_code=503,
@@ -153,7 +194,6 @@ async def get_sonar_stores(zipcode: str):
         return {
             "zipcode": zipcode,
             "stores_found": len(stores),
-            "search_timestamp": datetime.now().isoformat(),
             "stores": [
                 {
                     "store_id": store.store_id,
@@ -161,18 +201,11 @@ async def get_sonar_stores(zipcode: str):
                     "address": store.address,
                     "services": store.services,
                     "status": store.status,
-                    "zipcode": store.zipcode,
-                    "website": getattr(store, 'website', None),
-                    "location": {
-                        "zipcode": store.zipcode,
-                        "city": extract_city_from_address(store.address) if store.address else None,
-                        "state": extract_state_from_address(store.address) if store.address else None
-                    }
+                    "zipcode": store.zipcode
                 }
                 for store in stores
             ],
-            "source": "perplexity_sonar",
-            "api_version": "1.0.0"
+            "source": "perplexity_sonar"
         }
     except Exception as e:
         logger.error(f"❌ Sonar store search failed: {e}")
@@ -180,13 +213,12 @@ async def get_sonar_stores(zipcode: str):
             status_code=500,
             detail=f"Sonar search failed: {str(e)}"
         )
-    
-
 
 @app.get("/sonar/store/{store_name}/details")
 async def get_sonar_store_details(store_name: str, location: str):
     """Get detailed information about a specific store via Sonar"""
     try:
+        sonar_client = enhanced_scraper.location_service.sonar_client
         if not sonar_client.is_available():
             raise HTTPException(
                 status_code=503,
@@ -211,6 +243,7 @@ async def get_sonar_store_details(store_name: str, location: str):
 async def search_sonar_products(query: str, store_name: str, location: str):
     """Search for products at a specific store using Sonar"""
     try:
+        sonar_client = enhanced_scraper.location_service.sonar_client
         if not sonar_client.is_available():
             raise HTTPException(
                 status_code=503,
@@ -223,21 +256,8 @@ async def search_sonar_products(query: str, store_name: str, location: str):
             "store_name": store_name,
             "location": location,
             "products_found": len(products),
-            "search_timestamp": datetime.now().isoformat(),
-            "products": [
-                {
-                    "name": product.get("name", "Unknown Product"),
-                    "price": product.get("price"),
-                    "availability": product.get("availability", "Unknown"),
-                    "category": product.get("category"),
-                    "brand": product.get("brand"),
-                    "size": product.get("size"),
-                    "description": product.get("description")
-                }
-                for product in products
-            ],
-            "source": "perplexity_sonar",
-            "api_version": "1.0.0"
+            "products": products,
+            "source": "perplexity_sonar"
         }
     except Exception as e:
         logger.error(f"❌ Sonar product search failed: {e}")
@@ -249,6 +269,7 @@ async def search_sonar_products(query: str, store_name: str, location: str):
 @app.get("/sonar/status")
 async def get_sonar_status():
     """Get Sonar client status and configuration"""
+    sonar_client = enhanced_scraper.location_service.sonar_client
     return {
         "available": sonar_client.is_available(),
         "api_key_configured": sonar_client.api_key is not None,
