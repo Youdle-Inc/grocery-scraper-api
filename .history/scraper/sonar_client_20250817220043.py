@@ -194,12 +194,8 @@ Focus on current availability, accurate pricing, and finding actual product imag
             try:
                 logger.info("🔍 Enhancing products with Serper API...")
                 serper_client = SerperClient()
-                logger.info(f"🔍 Serper client available: {serper_client.is_available()}")
-                if serper_client.is_available():
-                    products = await serper_client.enhance_products_with_serper(products, store_name, location)
-                    logger.info("✅ Serper enhancement completed")
-                else:
-                    logger.info("⚠️ Serper API not available, skipping enhancement")
+                products = await serper_client.enhance_products_with_serper(products, store_name, location)
+                logger.info("✅ Serper enhancement completed")
             except Exception as e:
                 logger.warning(f"⚠️ Serper enhancement failed: {e}")
             

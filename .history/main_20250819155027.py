@@ -99,14 +99,12 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
+    sonar_ready = sonar_client.is_available()
     return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "version": "1.0.0",
-        "services": {
-            "perplexity_sonar": "available" if sonar_client.is_available() else "unavailable",
-            "serper_dev": "available" if os.getenv("SERPER_API_KEY") else "unavailable"
-        }
+        "status": "healthy" if sonar_ready else "degraded",
+        "timestamp": datetime.now(),
+        "sonar_ready": sonar_ready,
+        "api_key_configured": sonar_client.api_key is not None
     }
 
 

@@ -82,31 +82,30 @@ async def root():
     return {
         "name": "Grocery Scraper API",
         "version": "1.0.0",
-        "description": "AI-powered grocery product discovery with real URLs and images",
+        "description": "Professional API for discovering grocery stores using Perplexity Sonar",
+        "docs": "/docs",
+        "sonar_available": sonar_client.is_available(),
         "endpoints": {
             "health": "/health",
-            "stores": "/sonar/stores/search",
-            "products": "/sonar/products/search"
-        },
-        "features": [
-            "AI-powered product search",
-            "Real product URLs and images",
-            "Store discovery",
-            "Smart product matching"
-        ]
+            "sonar": {
+                "status": "/sonar/status",
+                "stores": "/sonar/stores/{zipcode}",
+                "store_details": "/sonar/store/{store_name}/details",
+                "product_search": "/sonar/products/search",
+                "test": "/sonar/test/{zipcode}"
+            }
+        }
     }
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
+    sonar_ready = sonar_client.is_available()
     return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "version": "1.0.0",
-        "services": {
-            "perplexity_sonar": "available" if sonar_client.is_available() else "unavailable",
-            "serper_dev": "available" if os.getenv("SERPER_API_KEY") else "unavailable"
-        }
+        "status": "healthy" if sonar_ready else "degraded",
+        "timestamp": datetime.now(),
+        "sonar_ready": sonar_ready,
+        "api_key_configured": sonar_client.api_key is not None
     }
 
 

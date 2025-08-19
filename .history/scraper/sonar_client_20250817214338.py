@@ -18,7 +18,6 @@ from dotenv import load_dotenv
 from .models import StoreLocation
 from .google_image_search import GoogleImageSearch
 from .hybrid_scraper import HybridScraper
-from .serper_client import SerperClient
 
 # Load environment variables from .env file
 load_dotenv()
@@ -153,27 +152,13 @@ CRITICAL: Always include the IMAGE_URL field for each product. Search the store'
 Focus on current availability, accurate pricing, and finding actual product images from the store's website."""
             
             response_data = await self._make_sonar_request(search_query)
+            products = self._parse_product_response(response_data["content"])
             
-            # Debug the response data structure
-            logger.info(f"🔍 Response data type: {type(response_data)}")
-            if isinstance(response_data, dict):
-                logger.info(f"🔍 Response data keys: {list(response_data.keys())}")
-            else:
-                logger.info(f"🔍 Response data is not a dict: {response_data[:100] if isinstance(response_data, str) else str(response_data)[:100]}")
+            # Extract real product URLs from citations and search results
+            citations = response_data.get("citations", [])
+            search_results = response_data.get("search_results", [])
             
-            # Handle both old and new response formats
-            if isinstance(response_data, dict):
-                content = response_data.get("content", "")
-                citations = response_data.get("citations", [])
-                search_results = response_data.get("search_results", [])
-            else:
-                # Fallback to old format (string response)
-                content = response_data
-                citations = []
-                search_results = []
-            
-            products = self._parse_product_response(content)
-            
+            logger.info(f"🔍 Response data keys: {list(response_data.keys())}")
             logger.info(f"🔍 Citations count: {len(citations)}")
             logger.info(f"🔍 Search results count: {len(search_results)}")
             if citations:
@@ -189,19 +174,6 @@ Focus on current availability, accurate pricing, and finding actual product imag
             
             # Enhance products with real URLs
             products = self._enhance_products_with_real_urls(products, real_urls)
-            
-            # Enhance products with Serper API for real URLs and images
-            try:
-                logger.info("🔍 Enhancing products with Serper API...")
-                serper_client = SerperClient()
-                logger.info(f"🔍 Serper client available: {serper_client.is_available()}")
-                if serper_client.is_available():
-                    products = await serper_client.enhance_products_with_serper(products, store_name, location)
-                    logger.info("✅ Serper enhancement completed")
-                else:
-                    logger.info("⚠️ Serper API not available, skipping enhancement")
-            except Exception as e:
-                logger.warning(f"⚠️ Serper enhancement failed: {e}")
             
             # Enhance products with hybrid scraping (images + additional data) - OPTIONAL
             # Only enable if explicitly requested

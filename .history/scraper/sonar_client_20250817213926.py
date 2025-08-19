@@ -18,7 +18,6 @@ from dotenv import load_dotenv
 from .models import StoreLocation
 from .google_image_search import GoogleImageSearch
 from .hybrid_scraper import HybridScraper
-from .serper_client import SerperClient
 
 # Load environment variables from .env file
 load_dotenv()
@@ -153,55 +152,13 @@ CRITICAL: Always include the IMAGE_URL field for each product. Search the store'
 Focus on current availability, accurate pricing, and finding actual product images from the store's website."""
             
             response_data = await self._make_sonar_request(search_query)
+            products = self._parse_product_response(response_data["content"])
             
-            # Debug the response data structure
-            logger.info(f"🔍 Response data type: {type(response_data)}")
-            if isinstance(response_data, dict):
-                logger.info(f"🔍 Response data keys: {list(response_data.keys())}")
-            else:
-                logger.info(f"🔍 Response data is not a dict: {response_data[:100] if isinstance(response_data, str) else str(response_data)[:100]}")
-            
-            # Handle both old and new response formats
-            if isinstance(response_data, dict):
-                content = response_data.get("content", "")
-                citations = response_data.get("citations", [])
-                search_results = response_data.get("search_results", [])
-            else:
-                # Fallback to old format (string response)
-                content = response_data
-                citations = []
-                search_results = []
-            
-            products = self._parse_product_response(content)
-            
-            logger.info(f"🔍 Citations count: {len(citations)}")
-            logger.info(f"🔍 Search results count: {len(search_results)}")
-            if citations:
-                logger.info(f"🔍 Sample citations: {citations[:2]}")
-            if search_results:
-                logger.info(f"🔍 Sample search results: {search_results[:2]}")
-            
-            real_urls = self._extract_real_product_urls(citations, search_results)
-            
-            # Debug logging
-            logger.info(f"🔍 Found {len(real_urls)} real URLs: {list(real_urls.keys())}")
-            logger.info(f"🔍 Products to match: {[p.get('name', '') for p in products]}")
+            # Extract real product URLs from citations and search results
+            real_urls = self._extract_real_product_urls(response_data.get("citations", []), response_data.get("search_results", []))
             
             # Enhance products with real URLs
             products = self._enhance_products_with_real_urls(products, real_urls)
-            
-            # Enhance products with Serper API for real URLs and images
-            try:
-                logger.info("🔍 Enhancing products with Serper API...")
-                serper_client = SerperClient()
-                logger.info(f"🔍 Serper client available: {serper_client.is_available()}")
-                if serper_client.is_available():
-                    products = await serper_client.enhance_products_with_serper(products, store_name, location)
-                    logger.info("✅ Serper enhancement completed")
-                else:
-                    logger.info("⚠️ Serper API not available, skipping enhancement")
-            except Exception as e:
-                logger.warning(f"⚠️ Serper enhancement failed: {e}")
             
             # Enhance products with hybrid scraping (images + additional data) - OPTIONAL
             # Only enable if explicitly requested
@@ -311,19 +268,21 @@ Focus on current availability, accurate pricing, and finding actual product imag
             
             if best_match:
                 enhanced_product["product_url"] = best_match
-                
-                # Try to extract image URL from the same source
-                if "target.com" in best_match:
-                    # Extract Target product ID and create image URL
-                    if "/A-" in best_match:
-                        product_id = best_match.split("/A-")[1].split("/")[0]
-                        enhanced_product["image_url"] = f"https://target.scene7.com/is/image/Target/{product_id}?wid=1200&hei=1200&qlt=80&fmt=webp"
-                
-                elif "walmart.com" in best_match:
-                    # Extract Walmart product ID and create image URL
-                    if "/ip/" in best_match:
-                        product_id = best_match.split("/ip/")[1].split("/")[1]
-                        enhanced_product["image_url"] = f"https://i5.walmartimages.com/asr/{product_id}.jpeg"
+                    
+                    # Try to extract image URL from the same source
+                    if "target.com" in real_url:
+                        # Extract Target product ID and create image URL
+                        if "/A-" in real_url:
+                            product_id = real_url.split("/A-")[1].split("/")[0]
+                            enhanced_product["image_url"] = f"https://target.scene7.com/is/image/Target/{product_id}?wid=1200&hei=1200&qlt=80&fmt=webp"
+                    
+                    elif "walmart.com" in real_url:
+                        # Extract Walmart product ID and create image URL
+                        if "/ip/" in real_url:
+                            product_id = real_url.split("/ip/")[1].split("/")[1]
+                            enhanced_product["image_url"] = f"https://i5.walmartimages.com/asr/{product_id}.jpeg"
+                    
+                    break
             
             enhanced_products.append(enhanced_product)
         

@@ -18,7 +18,6 @@ from dotenv import load_dotenv
 from .models import StoreLocation
 from .google_image_search import GoogleImageSearch
 from .hybrid_scraper import HybridScraper
-from .serper_client import SerperClient
 
 # Load environment variables from .env file
 load_dotenv()
@@ -64,10 +63,10 @@ class SonarClient:
             logger.info(f"🔍 Searching Sonar for stores in {zipcode}")
             
             # Make Sonar request
-            response_data = await self._make_sonar_request(query)
+            response = await self._make_sonar_request(query)
             
             # Parse response
-            stores = self._parse_store_response(response_data["content"], zipcode)
+            stores = self._parse_store_response(response, zipcode)
             
             # Cache the results
             self._cache[cache_key] = {
@@ -98,8 +97,8 @@ class SonarClient:
             
             Format the response as structured data."""
             
-            response_data = await self._make_sonar_request(query)
-            return self._parse_store_details(response_data["content"])
+            response = await self._make_sonar_request(query)
+            return self._parse_store_details(response)
             
         except Exception as e:
             logger.error(f"❌ Failed to get store details for {store_name}: {e}")
@@ -153,55 +152,13 @@ CRITICAL: Always include the IMAGE_URL field for each product. Search the store'
 Focus on current availability, accurate pricing, and finding actual product images from the store's website."""
             
             response_data = await self._make_sonar_request(search_query)
+            products = self._parse_product_response(response_data["content"])
             
-            # Debug the response data structure
-            logger.info(f"🔍 Response data type: {type(response_data)}")
-            if isinstance(response_data, dict):
-                logger.info(f"🔍 Response data keys: {list(response_data.keys())}")
-            else:
-                logger.info(f"🔍 Response data is not a dict: {response_data[:100] if isinstance(response_data, str) else str(response_data)[:100]}")
-            
-            # Handle both old and new response formats
-            if isinstance(response_data, dict):
-                content = response_data.get("content", "")
-                citations = response_data.get("citations", [])
-                search_results = response_data.get("search_results", [])
-            else:
-                # Fallback to old format (string response)
-                content = response_data
-                citations = []
-                search_results = []
-            
-            products = self._parse_product_response(content)
-            
-            logger.info(f"🔍 Citations count: {len(citations)}")
-            logger.info(f"🔍 Search results count: {len(search_results)}")
-            if citations:
-                logger.info(f"🔍 Sample citations: {citations[:2]}")
-            if search_results:
-                logger.info(f"🔍 Sample search results: {search_results[:2]}")
-            
-            real_urls = self._extract_real_product_urls(citations, search_results)
-            
-            # Debug logging
-            logger.info(f"🔍 Found {len(real_urls)} real URLs: {list(real_urls.keys())}")
-            logger.info(f"🔍 Products to match: {[p.get('name', '') for p in products]}")
+            # Extract real product URLs from citations and search results
+            real_urls = self._extract_real_product_urls(response_data.get("citations", []), response_data.get("search_results", []))
             
             # Enhance products with real URLs
             products = self._enhance_products_with_real_urls(products, real_urls)
-            
-            # Enhance products with Serper API for real URLs and images
-            try:
-                logger.info("🔍 Enhancing products with Serper API...")
-                serper_client = SerperClient()
-                logger.info(f"🔍 Serper client available: {serper_client.is_available()}")
-                if serper_client.is_available():
-                    products = await serper_client.enhance_products_with_serper(products, store_name, location)
-                    logger.info("✅ Serper enhancement completed")
-                else:
-                    logger.info("⚠️ Serper API not available, skipping enhancement")
-            except Exception as e:
-                logger.warning(f"⚠️ Serper enhancement failed: {e}")
             
             # Enhance products with hybrid scraping (images + additional data) - OPTIONAL
             # Only enable if explicitly requested
@@ -231,103 +188,6 @@ Focus on current availability, accurate pricing, and finding actual product imag
         except Exception as e:
             logger.error(f"❌ Failed to search products for {query} at {store_name}: {e}")
             return []
-    
-    def _extract_real_product_urls(self, citations: List[str], search_results: List[Dict[str, Any]]) -> Dict[str, str]:
-        """Extract real product URLs from Perplexity API response"""
-        real_urls = {}
-        
-        # Extract from citations
-        for citation in citations:
-            if "target.com/p/" in citation or "walmart.com/ip/" in citation or "amazon.com/dp/" in citation:
-                # Extract product name from URL
-                product_name = self._extract_product_name_from_url(citation)
-                if product_name:
-                    real_urls[product_name.lower()] = citation
-        
-        # Extract from search results
-        for result in search_results:
-            url = result.get("url", "")
-            if "target.com/p/" in url or "walmart.com/ip/" in url or "amazon.com/dp/" in url:
-                product_name = self._extract_product_name_from_url(url)
-                if product_name:
-                    real_urls[product_name.lower()] = url
-        
-        logger.info(f"🔗 Found {len(real_urls)} real product URLs")
-        return real_urls
-    
-    def _extract_product_name_from_url(self, url: str) -> str:
-        """Extract product name from store URL"""
-        try:
-            if "target.com/p/" in url:
-                # Extract from Target URL: /p/product-name/-/A-123456
-                parts = url.split("/p/")
-                if len(parts) > 1:
-                    product_part = parts[1].split("/-/")[0]
-                    return product_part.replace("-", " ").title()
-            
-            elif "walmart.com/ip/" in url:
-                # Extract from Walmart URL: /ip/product-name/123456
-                parts = url.split("/ip/")
-                if len(parts) > 1:
-                    product_part = parts[1].split("/")[0]
-                    return product_part.replace("-", " ").title()
-            
-            elif "amazon.com/dp/" in url:
-                # For Amazon, we'll use the ASIN as the identifier
-                parts = url.split("/dp/")
-                if len(parts) > 1:
-                    asin = parts[1].split("/")[0]
-                    return f"Amazon Product {asin}"
-        
-        except Exception as e:
-            logger.debug(f"Failed to extract product name from URL {url}: {e}")
-        
-        return ""
-    
-    def _enhance_products_with_real_urls(self, products: List[Dict[str, Any]], real_urls: Dict[str, str]) -> List[Dict[str, Any]]:
-        """Enhance products with real URLs from Perplexity API"""
-        enhanced_products = []
-        
-        for product in products:
-            enhanced_product = product.copy()
-            product_name = product.get("name", "").lower()
-            
-            # Try to find matching real URL with improved matching
-            best_match = None
-            best_score = 0
-            
-            for url_key, real_url in real_urls.items():
-                # Calculate similarity score
-                product_words = set(product_name.split())
-                url_words = set(url_key.split())
-                
-                # Count common words
-                common_words = product_words.intersection(url_words)
-                score = len(common_words) / max(len(product_words), len(url_words))
-                
-                if score > best_score and score > 0.3:  # At least 30% match
-                    best_score = score
-                    best_match = real_url
-            
-            if best_match:
-                enhanced_product["product_url"] = best_match
-                
-                # Try to extract image URL from the same source
-                if "target.com" in best_match:
-                    # Extract Target product ID and create image URL
-                    if "/A-" in best_match:
-                        product_id = best_match.split("/A-")[1].split("/")[0]
-                        enhanced_product["image_url"] = f"https://target.scene7.com/is/image/Target/{product_id}?wid=1200&hei=1200&qlt=80&fmt=webp"
-                
-                elif "walmart.com" in best_match:
-                    # Extract Walmart product ID and create image URL
-                    if "/ip/" in best_match:
-                        product_id = best_match.split("/ip/")[1].split("/")[1]
-                        enhanced_product["image_url"] = f"https://i5.walmartimages.com/asr/{product_id}.jpeg"
-            
-            enhanced_products.append(enhanced_product)
-        
-        return enhanced_products
     
     def _create_store_query(self, zipcode: str) -> str:
         """Create a Sonar query for finding grocery stores"""

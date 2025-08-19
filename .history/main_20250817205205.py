@@ -82,31 +82,30 @@ async def root():
     return {
         "name": "Grocery Scraper API",
         "version": "1.0.0",
-        "description": "AI-powered grocery product discovery with real URLs and images",
+        "description": "Professional API for discovering grocery stores using Perplexity Sonar",
+        "docs": "/docs",
+        "sonar_available": sonar_client.is_available(),
         "endpoints": {
             "health": "/health",
-            "stores": "/sonar/stores/search",
-            "products": "/sonar/products/search"
-        },
-        "features": [
-            "AI-powered product search",
-            "Real product URLs and images",
-            "Store discovery",
-            "Smart product matching"
-        ]
+            "sonar": {
+                "status": "/sonar/status",
+                "stores": "/sonar/stores/{zipcode}",
+                "store_details": "/sonar/store/{store_name}/details",
+                "product_search": "/sonar/products/search",
+                "test": "/sonar/test/{zipcode}"
+            }
+        }
     }
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
+    sonar_ready = sonar_client.is_available()
     return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "version": "1.0.0",
-        "services": {
-            "perplexity_sonar": "available" if sonar_client.is_available() else "unavailable",
-            "serper_dev": "available" if os.getenv("SERPER_API_KEY") else "unavailable"
-        }
+        "status": "healthy" if sonar_ready else "degraded",
+        "timestamp": datetime.now(),
+        "sonar_ready": sonar_ready,
+        "api_key_configured": sonar_client.api_key is not None
     }
 
 
@@ -218,7 +217,7 @@ async def search_sonar_products(query: str, store_name: str, location: str, enha
                 detail="Sonar client not available - check API key configuration"
             )
         
-        products = await sonar_client.search_products(query, store_name, location, enhance)
+        products = await sonar_client.search_products(query, store_name, location)
         return {
             "query": query,
             "store_name": store_name,
@@ -233,16 +232,7 @@ async def search_sonar_products(query: str, store_name: str, location: str, enha
                     "category": product.get("category"),
                     "brand": product.get("brand"),
                     "size": product.get("size"),
-                    "description": product.get("description"),
-                    "image_url": product.get("image_url"),
-                    "product_url": product.get("product_url"),
-                    "nutritional_info": product.get("nutritional_info"),
-                    "ingredients": product.get("ingredients"),
-                    "allergens": product.get("allergens"),
-                    "online_available": product.get("online_available"),
-                    "in_store_only": product.get("in_store_only"),
-                    "reviews_count": product.get("reviews_count"),
-                    "rating": product.get("rating")
+                    "description": product.get("description")
                 }
                 for product in products
             ],
