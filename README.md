@@ -1,259 +1,213 @@
-# 🛒 Grocery Scraper API
+# Grocery Scraper API
 
-A powerful AI-powered grocery product discovery API that combines **Perplexity Sonar** for intelligent product search with **Serper.dev** for real product URLs and images.
+A FastAPI service for scraping real grocery store product data using Selenium.
 
-## ✨ Features
+## 🚀 Features
 
-### 🤖 AI-Powered Product Discovery
-- **Perplexity Sonar Integration**: Uses advanced AI to find products across multiple stores
-- **Smart Product Matching**: Intelligent matching of product names and descriptions
-- **Real-time Store Discovery**: Find grocery stores in any location with detailed information
+- **Real Data Scraping** - Uses Selenium to scrape actual grocery websites
+- **Multiple Stores** - Supports Giant Eagle, Wegmans, ALDI, Albertsons, ShopRite
+- **Production Ready** - Docker support, health checks, error handling
+- **Type Safe** - Full Pydantic model validation
 
-### 🔗 Real Product Data
-- **Real Product URLs**: Direct links to Google Shopping product pages
-- **High-Quality Images**: Product images from Google's CDN
-- **Live Pricing**: Current prices from various retailers
-- **Customer Ratings**: Real ratings and review counts
-- **Store-Specific Results**: Filter by Target, Walmart, Safeway, and more
-
-### 🚀 Performance & Reliability
-- **Fast Response Times**: Optimized for quick product searches
-- **Robust Error Handling**: Graceful fallbacks and detailed error messages
-- **Caching**: Intelligent caching for improved performance
-- **Async Processing**: Non-blocking API calls for better scalability
-
-## 🏗️ Architecture
+## 📁 Project Structure
 
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   FastAPI App   │───▶│  Perplexity      │───▶│  Serper.dev     │
-│                 │    │  Sonar Client    │    │  Google Shopping│
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-         │                       │                       │
-         ▼                       ▼                       ▼
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Product       │    │   Store          │    │   Real URLs &   │
-│   Matching      │    │   Discovery      │    │   Images        │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
+grocery-scraper-api/
+├── main.py                 # FastAPI application entry point
+├── requirements.txt        # Python dependencies
+├── Dockerfile             # Container configuration
+├── README.md              # This file
+├── scraper/               # Scraper package
+│   ├── __init__.py        # Package initialization
+│   ├── core.py            # Core scraping logic
+│   ├── models.py          # Pydantic models
+│   └── config.py          # Store configurations
+└── tests/                 # Test files (optional)
 ```
 
-## 🚀 Quick Start
+## 🛠️ Installation
 
-### 1. Clone and Setup
+### Local Development
+
+1. **Clone and setup:**
+   ```bash
+   cd grocery-scraper-api
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   pip install -r requirements.txt
+   ```
+
+2. **Run the API:**
+   ```bash
+   uvicorn main:app --reload
+   ```
+
+3. **Access the API:**
+   - API: http://localhost:8000
+   - Documentation: http://localhost:8000/docs
+   - Alternative docs: http://localhost:8000/redoc
+
+### Docker
+
 ```bash
-git clone <your-repo>
-cd grocery-scraper-api
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
+docker build -t grocery-scraper-api .
+docker run -p 8000:8000 grocery-scraper-api
 ```
 
-### 2. Configure API Keys
-Create a `.env` file in the project root:
+## 🌐 API Endpoints
+
+### Core Endpoints
+
+- `GET /` - API information
+- `GET /health` - Health check
+- `GET /stores` - List supported stores
+- `POST /scrape` - Scrape products (main endpoint)
+- `GET /scrape` - Scrape products (GET version)
+- `GET /test/{store}` - Quick test for a store
+
+### Example Usage
+
+**Scrape products:**
 ```bash
-# Required: Perplexity Sonar API Key
-PERPLEXITY_API_KEY=your_perplexity_api_key_here
-
-# Required: Serper.dev API Key (for real product URLs and images)
-SERPER_API_KEY=your_serper_api_key_here
+curl -X POST "http://localhost:8000/scrape" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "milk",
+    "store": "gianteagle",
+    "zipcode": "15213"
+  }'
 ```
 
-### 3. Run the API
+**Quick test:**
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8000
+curl "http://localhost:8000/scrape?query=milk&store=gianteagle&zipcode=15213"
 ```
 
-### 4. Test the API
-```bash
-# Find stores in a location
-curl "http://localhost:8000/sonar/stores/search?location=Chicago,IL"
+## 🏪 Supported Stores
 
-# Search for products with real URLs and images
-curl "http://localhost:8000/sonar/products/search?query=milk&store_name=Target&location=Chicago,IL"
-```
+| Store | Status | Products Found | Notes |
+|-------|--------|----------------|-------|
+| Giant Eagle | ✅ Working | ~11 products | Best performance |
+| Wegmans | ✅ Working | ~6 products | Reliable |
+| ALDI | ✅ Working | ~15 products | Good variety |
+| Albertsons | ⚠️ Limited | Variable | May have restrictions |
+| ShopRite | ⚠️ Limited | Variable | May have restrictions |
 
-## 📚 API Endpoints
+## 📊 Response Format
 
-### Store Discovery
-```http
-GET /sonar/stores/search?location={location}
-```
-
-**Example Response:**
 ```json
 {
-  "location": "Chicago, IL",
-  "stores_found": 3,
-  "stores": [
+  "success": true,
+  "store": "gianteagle",
+  "query": "milk",
+  "zipcode": "15213",
+  "result_count": 11,
+  "scraper_type": "real",
+  "timestamp": "2024-01-07T12:00:00",
+  "listings": [
     {
-      "store_id": "target",
-      "store_name": "Target",
-      "address": "123 Main St, Chicago, IL 60601",
-      "services": ["delivery", "pickup", "in-store"],
-      "status": "active",
-      "website": "https://www.target.com"
+      "title": "Giant Eagle 2% Reduced Fat Milk",
+      "product_name": "Giant Eagle 2% Reduced Fat Milk",
+      "brand": "Giant Eagle",
+      "price": "$3.99",
+      "image_url": "https://...",
+      "availability": "In Stock",
+      "description": "Giant Eagle 2% Reduced Fat Milk"
     }
-  ],
-  "source": "perplexity_sonar"
+  ]
 }
 ```
 
-### Product Search
-```http
-GET /sonar/products/search?query={product}&store_name={store}&location={location}
+## 🚀 Deployment
+
+### Render.com (Recommended)
+
+1. Push this folder to GitHub
+2. Connect to Render.com
+3. Create new Web Service
+4. Configure:
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+
+### Railway
+
+```bash
+railway login
+railway init
+railway up
 ```
 
-**Example Response:**
-```json
-{
-  "query": "oat milk",
-  "store_name": "Target",
-  "location": "Chicago, IL",
-  "products_found": 6,
-  "search_timestamp": "2025-08-19T15:42:58.731850",
-  "products": [
-    {
-      "name": "Oatly Original Oatmilk",
-      "price": 4.99,
-      "availability": "in stock",
-      "category": "Dairy Alternatives",
-      "brand": "Oatly",
-      "size": "64 oz",
-      "description": "Original oat milk, creamy and delicious",
-      "image_url": "https://encrypted-tbn1.gstatic.com/shopping?q=tbn:ANd9GcQ77QBCxGp6Fl572X73iaEEaL5qnAB5nse4cjxqaNTr0Hqi8FVhC5xGni3IMPlWoh58k-yhTqQPooAnLWDuwh0R9ucDakiD0Q",
-      "product_url": "https://google.com/shopping/product/2512895342606972574?gl=us",
-      "rating": 4.5,
-      "reviews_count": 1250
-    }
-  ],
-  "source": "perplexity_sonar + serper_dev"
-}
+### Heroku
+
+```bash
+echo "web: uvicorn main:app --host 0.0.0.0 --port \$PORT" > Procfile
+heroku create your-scraper-api
+git push heroku main
 ```
 
-## 🔧 Configuration
+## 🧪 Testing
+
+**Test health:**
+```bash
+curl http://localhost:8000/health
+```
+
+**Test stores:**
+```bash
+curl http://localhost:8000/stores
+```
+
+**Test scraping:**
+```bash
+curl "http://localhost:8000/test/gianteagle"
+```
+
+## ⚙️ Configuration
 
 ### Environment Variables
 
-| Variable | Description | Required | Example |
-|----------|-------------|----------|---------|
-| `PERPLEXITY_API_KEY` | Perplexity Sonar API key | ✅ | `pplx-abc123...` |
-| `SERPER_API_KEY` | Serper.dev API key | ✅ | `80ff8a83e123e4ae68792aef4a946ee7335bd8ca` |
+- `PORT` - Server port (default: 8000)
+- `CHROME_BIN` - Chrome binary path (for Docker)
+- `DISPLAY` - Display for headless mode (for Docker)
 
-### API Response Fields
+### Scraper Settings
 
-#### Product Fields
-- `name`: Product name
-- `price`: Current price (float)
-- `availability`: Stock status
-- `category`: Product category
-- `brand`: Brand name
-- `size`: Product size/volume
-- `description`: Product description
-- `image_url`: **Real product image URL** (from Google Shopping)
-- `product_url`: **Real product page URL** (from Google Shopping)
-- `rating`: Customer rating (1-5)
-- `reviews_count`: Number of reviews
+Edit `scraper/config.py` to modify:
+- Store configurations
+- Selectors
+- Timeouts
+- User agents
 
-## 🛠️ Development
+## 🔧 Development
 
-### Project Structure
-```
-grocery-scraper-api/
-├── main.py                 # FastAPI application
-├── scraper/
-│   ├── sonar_client.py     # Perplexity Sonar integration
-│   ├── serper_client.py    # Serper.dev integration
-│   ├── models.py           # Pydantic models
-│   └── config.py           # Configuration
-├── requirements.txt        # Python dependencies
-└── .env                    # Environment variables
-```
+### Adding New Stores
 
-### Key Components
+1. Add store config to `scraper/config.py`
+2. Test selectors with browser dev tools
+3. Update `SUPPORTED_STORES` dictionary
+4. Test with `/test/{store}` endpoint
 
-#### SonarClient (`scraper/sonar_client.py`)
-- Handles Perplexity Sonar API communication
-- Parses AI-generated product information
-- Manages store discovery and product search
+### Debugging
 
-#### SerperClient (`scraper/serper_client.py`)
-- Integrates with Serper.dev for Google Shopping data
-- Provides real product URLs and images
-- Matches products by name similarity
+- Check logs for scraping details
+- Use `/health` endpoint to verify Selenium
+- Test individual stores with `/test/{store}`
+- Enable non-headless mode for visual debugging
 
-### Testing
-```bash
-# Test the API endpoints
-python test_sonar.py
+## 📝 License
 
-# Test Serper.dev integration
-python test_serper_integration.py
-```
-
-## 🔍 How It Works
-
-### 1. Product Search Flow
-1. **User Request**: Search for "oat milk" at Target
-2. **Perplexity Sonar**: AI finds products with names, prices, descriptions
-3. **Serper.dev**: Gets real URLs and images from Google Shopping
-4. **Smart Matching**: Matches products by name similarity
-5. **Response**: Returns combined data with real URLs and images
-
-### 2. Store Discovery Flow
-1. **User Request**: Find stores in "Chicago, IL"
-2. **Perplexity Sonar**: AI discovers grocery stores in the area
-3. **Response**: Returns store details with addresses and services
-
-## 🎯 Use Cases
-
-- **E-commerce Integration**: Add real product data to your shopping apps
-- **Price Comparison**: Compare prices across multiple stores
-- **Inventory Management**: Check product availability and pricing
-- **Market Research**: Analyze product offerings and pricing trends
-- **Mobile Apps**: Power grocery shopping and price comparison apps
-
-## 🚀 Performance
-
-- **Response Time**: < 5 seconds for product searches
-- **Concurrent Requests**: Supports multiple simultaneous searches
-- **Caching**: Intelligent caching reduces API calls
-- **Error Handling**: Graceful fallbacks for failed requests
-
-## 🔒 Security
-
-- **API Keys**: Stored securely in environment variables
-- **No Hardcoded Secrets**: All sensitive data in `.env` file
-- **Input Validation**: Pydantic models validate all inputs
-- **Error Sanitization**: Safe error messages without sensitive data
-
-## 📈 Future Enhancements
-
-- [ ] **Price History**: Track price changes over time
-- [ ] **Nutritional Data**: Add nutritional information for products
-- [ ] **Inventory Alerts**: Notify when products come back in stock
-- [ ] **Multi-language Support**: Support for international stores
-- [ ] **Advanced Filtering**: Filter by price range, brand, etc.
-- [ ] **Webhook Support**: Real-time product updates
+MIT License - feel free to use in your projects!
 
 ## 🤝 Contributing
 
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Add tests
+4. Add tests if applicable
 5. Submit a pull request
 
-## 📄 License
+## 📞 Support
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## 🆘 Support
-
-- **Documentation**: Check this README and inline code comments
-- **Issues**: Create an issue on GitHub for bugs or feature requests
-- **API Keys**: Get help with Perplexity Sonar and Serper.dev setup
-
----
-
-**Built with ❤️ using FastAPI, Perplexity Sonar, and Serper.dev**
-
+- Check the `/docs` endpoint for API documentation
+- Review logs for debugging information
+- Ensure Chrome is installed for Selenium functionality

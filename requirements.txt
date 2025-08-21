@@ -17,10 +17,5 @@ groq==0.4.1
 html2text==2020.1.16
 selenium-stealth==1.0.6
 
-# Perplexity Sonar (using requests directly)
-
-# Image Scraping
-aiohttp==3.9.1
-
 # Token counting
 tiktoken==0.5.1
