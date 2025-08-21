@@ -90,16 +90,7 @@ class GroceryScraper:
             if os.path.exists(chromedriver_path):
                 service = Service(chromedriver_path)
             else:
-                # Fix webdriver-manager bug that returns wrong file path
-                chromedriver_path = ChromeDriverManager().install()
-                if "THIRD_PARTY_NOTICES" in chromedriver_path:
-                    chromedriver_path = chromedriver_path.replace("THIRD_PARTY_NOTICES.chromedriver", "chromedriver")
-                
-                # Ensure the chromedriver is executable
-                if os.path.exists(chromedriver_path) and not os.access(chromedriver_path, os.X_OK):
-                    os.chmod(chromedriver_path, 0o755)
-                
-                service = Service(chromedriver_path)
+                service = Service(ChromeDriverManager().install())
             
             driver = webdriver.Chrome(service=service, options=options)
             
