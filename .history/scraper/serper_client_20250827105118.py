@@ -185,7 +185,6 @@ class SerperClient:
                     "walmart": "walmart.com",
                     "whole foods market": "wholefoodsmarket.com",
                     "whole foods": "wholefoodsmarket.com",
-                    "whole_foods": "wholefoodsmarket.com",
                     "aldi": "aldi.us",
                     "costco": "costco.com",
                     "kroger": "kroger.com",

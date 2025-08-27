@@ -395,11 +395,6 @@ async def aggregate_products(
                 "sams_club": "Sam's Club",
                 "trader_joes": "Trader Joe's",
                 "ahold_delhaize": "Stop & Shop",
-                "kroger": "Kroger",
-                "target": "Target",
-                "walmart": "Walmart",
-                "costco": "Costco",
-                "aldi": "ALDI",
             }
             if store_id in mapping:
                 return mapping[store_id]

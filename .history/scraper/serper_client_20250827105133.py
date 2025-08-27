@@ -180,7 +180,7 @@ class SerperClient:
             # Determine expected domain if store filter provided
             expected_domain = None
             if store_name:
-                domain_map = {
+                                domain_map = {
                     "target": "target.com",
                     "walmart": "walmart.com",
                     "whole foods market": "wholefoodsmarket.com",

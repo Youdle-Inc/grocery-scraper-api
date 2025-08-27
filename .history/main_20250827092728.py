@@ -17,7 +17,6 @@ from scraper.models import StoreInfo
 from scraper.sonar_client import SonarClient
 from scraper.location_service import LocationService
 from scraper.cache import Cache, stores_key, products_key
-from scraper.serper_client import SerperClient
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -146,20 +145,14 @@ async def test_sonar(zipcode: str):
         }
 
 @app.get("/sonar/stores/{zipcode}")
-async def get_sonar_stores(zipcode: str, chains: Optional[str] = None):
+async def get_sonar_stores(zipcode: str):
     """Get stores discovered via Perplexity Sonar for a zipcode"""
     try:
         # Try cache first
         key = stores_key(zipcode)
         cached = await cache.get_json(key)
         if cached:
-            logger.info(f"cache_hit stores zip={zipcode}")
-            # Optional filter by chains (comma-separated canonical IDs)
-            if chains:
-                requested = {c.strip().lower() for c in chains.split(',') if c.strip()}
-                filtered = [s for s in cached.get("stores", []) if s.get("store_id") in requested]
-                return {**cached, "stores": filtered, "stores_found": len(filtered), "cache": {"hit": True}}
-            return {**cached, "cache": {"hit": True}}
+            return cached
 
         if not sonar_client.is_available():
             raise HTTPException(
@@ -168,7 +161,7 @@ async def get_sonar_stores(zipcode: str, chains: Optional[str] = None):
             )
         
         stores = await sonar_client.search_stores(zipcode)
-        response_payload = {
+        return {
             "zipcode": zipcode,
             "stores_found": len(stores),
             "search_timestamp": datetime.now().isoformat(),
@@ -192,15 +185,6 @@ async def get_sonar_stores(zipcode: str, chains: Optional[str] = None):
             "source": "perplexity_sonar",
             "api_version": "1.0.0"
         }
-        # Cache the unfiltered payload
-        logger.info(f"cache_miss stores zip={zipcode} -> setting cache")
-        await cache.set_json(key, response_payload, ttl_seconds=60*60*24)
-        # Apply filter on the response if requested
-        if chains:
-            requested = {c.strip().lower() for c in chains.split(',') if c.strip()}
-            filtered = [s for s in response_payload.get("stores", []) if s.get("store_id") in requested]
-            return {**response_payload, "stores": filtered, "stores_found": len(filtered), "cache": {"hit": False}}
-        return {**response_payload, "cache": {"hit": False}}
     except Exception as e:
         logger.error(f"❌ Sonar store search failed: {e}")
         raise HTTPException(
@@ -243,7 +227,7 @@ async def get_sonar_stores(zipcode: str, chains: Optional[str] = None):
 
 
 @app.get("/sonar/store/{store_name}/details")
-async def get_sonar_store_details(store_name: str, location: Optional[str] = None, zipcode: Optional[str] = None):
+async def get_sonar_store_details(store_name: str, location: str):
     """Get detailed information about a specific store via Sonar"""
     try:
         if not sonar_client.is_available():
@@ -251,15 +235,11 @@ async def get_sonar_store_details(store_name: str, location: Optional[str] = Non
                 status_code=503,
                 detail="Sonar client not available - check API key configuration"
             )
-        # Prefer zipcode if provided
-        resolved_location = location or zipcode or ""
-        if not resolved_location:
-            raise HTTPException(status_code=400, detail="Provide either location or zipcode")
-
-        details = await sonar_client.get_store_details(store_name, resolved_location)
+        
+        details = await sonar_client.get_store_details(store_name, location)
         return {
             "store_name": store_name,
-            "location": resolved_location,
+            "location": location,
             "details": details,
             "source": "perplexity_sonar"
         }
@@ -271,7 +251,7 @@ async def get_sonar_store_details(store_name: str, location: Optional[str] = Non
         )
 
 @app.get("/sonar/products/search")
-async def search_sonar_products(query: str, store_name: str, location: Optional[str] = None, zipcode: Optional[str] = None, enhance: bool = False):
+async def search_sonar_products(query: str, store_name: str, location: str, enhance: bool = False):
     """Search for products at a specific store using Sonar"""
     try:
         if not sonar_client.is_available():
@@ -279,16 +259,12 @@ async def search_sonar_products(query: str, store_name: str, location: Optional[
                 status_code=503,
                 detail="Sonar client not available - check API key configuration"
             )
-        # Prefer zipcode if provided
-        resolved_location = location or zipcode or ""
-        if not resolved_location:
-            raise HTTPException(status_code=400, detail="Provide either location or zipcode")
-
-        products = await sonar_client.search_products(query, store_name, resolved_location, enhance)
+        
+        products = await sonar_client.search_products(query, store_name, location, enhance)
         return {
             "query": query,
             "store_name": store_name,
-            "location": resolved_location,
+            "location": location,
             "products_found": len(products),
             "search_timestamp": datetime.now().isoformat(),
             "products": [
@@ -339,8 +315,7 @@ async def aggregate_products(
     zipcode: str,
     radius_miles: int = 10,
     stores: Optional[str] = None,
-    enhance: bool = False,
-    refresh: bool = False
+    enhance: bool = False
 ):
     """Product-first search across multiple stores in a zipcode with caching."""
     try:
@@ -354,154 +329,36 @@ async def aggregate_products(
         if stores:
             user_store_ids = [s.strip().lower() for s in stores.split(",") if s.strip()]
 
-        # Resolve nearby stores (filtered) unless user explicitly specifies stores
+        # Resolve nearby stores (filtered)
         nearby = await location_service.get_nearby_stores(zipcode)
-        considered_store_ids: list[str] = []
         if user_store_ids:
-            # Prefer user-provided stores regardless of discovery coverage
-            considered_store_ids = user_store_ids[:10]
-        else:
-            considered_store_ids = [s.store_id for s in nearby][:10]
+            nearby = [s for s in nearby if s.store_id in user_store_ids]
+
+        considered_store_ids = [s.store_id for s in nearby][:10]
 
         # Cache lookup for aggregated products
         key = products_key(zipcode, query, considered_store_ids, enhance)
-        cached = None if refresh else await cache.get_json(key)
-        if cached and not refresh:
-            logger.info(f"cache_hit aggregate zip={zipcode} q='{query}'")
-            # Near-stale refresh: if TTL < 20% of full, refresh in background
-            ttl = await cache.ttl_seconds(key)
-            try:
-                is_near_stale = isinstance(ttl, int) and ttl > 0 and ttl < (60 * 60 * 4 * 0.2)
-            except Exception:
-                is_near_stale = False
-            if is_near_stale:
-                async def _refresh():
-                    try:
-                        # Trigger a background refresh by re-running aggregation path
-                        pass  # Placeholder for Phase 2 background task system
-                    except Exception:
-                        pass
-                # Fire-and-forget (no background task runner here)
-                # await _refresh()  # intentionally not awaited
-            return {**cached, "cache": {"hit": True, "near_stale": bool(is_near_stale)}}
+        cached = await cache.get_json(key)
+        if cached:
+            return cached
 
-        # Fan out per store with concurrency limits and per-store timeout
-        semaphore = asyncio.Semaphore(10)
+        # Fan out per store
+        async def fetch_store(store_id: str, store_name: str):
+            products = await sonar_client.search_products(query, store_name, zipcode, enhance)
+            return store_id, store_name, products
 
-        # Map canonical store_id to a human-friendly store name for Sonar/Serper prompts
-        def to_store_name(store_id: str) -> str:
-            mapping = {
-                "whole_foods": "Whole Foods Market",
-                "sams_club": "Sam's Club",
-                "trader_joes": "Trader Joe's",
-                "ahold_delhaize": "Stop & Shop",
-                "kroger": "Kroger",
-                "target": "Target",
-                "walmart": "Walmart",
-                "costco": "Costco",
-                "aldi": "ALDI",
-            }
-            if store_id in mapping:
-                return mapping[store_id]
-            return store_id.replace("_", " ").title()
-
-        async def fetch_store(store_id: str):
-            async with semaphore:
-                try:
-                    # Get Sonar results
-                    sonar_results = await asyncio.wait_for(
-                        sonar_client.search_products(query, to_store_name(store_id), zipcode, enhance=False),  # Don't use Sonar's enhance
-                        timeout=20
-                    )
-                    
-                    # If enhance is requested, add Serper enhancement
-                    if enhance and serper.is_available():
-                        try:
-                            # Enhance each product with Serper data
-                            enhanced_results = []
-                            for product in sonar_results:
-                                enhanced_product = product.copy()
-                                product_name = product.get('name', '')
-                                
-                                # Search Serper for this specific product
-                                serper_products = await serper.search_shopping_products(product_name, to_store_name(store_id), "United States")
-                                
-                                # Find best match and enhance
-                                if serper_products:
-                                    best_match = serper_products[0]  # Take first match for now
-                                    enhanced_product.update({
-                                        'product_url': best_match.get('product_url', enhanced_product.get('product_url')),
-                                        'image_url': best_match.get('image_url', enhanced_product.get('image_url')),
-                                        'price': best_match.get('price', enhanced_product.get('price')),
-                                        'availability': best_match.get('availability', enhanced_product.get('availability')),
-                                        'source': ['perplexity_sonar', 'serper_shopping']
-                                    })
-                                
-                                enhanced_results.append(enhanced_product)
-                            
-                            return enhanced_results
-                        except Exception as e:
-                            logger.warning(f"serper_enhancement_error store={store_id} err={repr(e)}")
-                            return sonar_results
-                    
-                    return sonar_results
-                except Exception as e:
-                    raise e
-
-        tasks = [fetch_store(sid) for sid in considered_store_ids]
-        raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+        tasks = [
+            fetch_store(s.store_id, s.store_name)
+            for s in nearby[:10]
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Normalize into offers
         all_offers = []
-        serper = SerperClient()
-        for idx, res in enumerate(raw_results):
+        for res in results:
             if isinstance(res, Exception):
-                store_id = considered_store_ids[idx]
-                store_name = to_store_name(store_id)
-                logger.warning(f"aggregate_store_error store={store_id} err={repr(res)}")
-                # Serper fallback on error
-                if serper.is_available():
-                    try:
-                        serper_products = await serper.search_shopping_products(query, store_name, "United States")
-                        for sp in serper_products:
-                            all_offers.append({
-                                "store_id": store_id,
-                                "store_name": store_name,
-                                "name": sp.get("name"),
-                                "brand": None,
-                                "size": None,
-                                "price": sp.get("price"),
-                                "availability": sp.get("availability"),
-                                "image_url": sp.get("image_url"),
-                                "product_url": sp.get("product_url"),
-                                "source": ["serper_shopping"]
-                            })
-                    except Exception as e:
-                        logger.warning(f"serper_fallback_error store={store_id} err={repr(e)}")
                 continue
-            store_id = considered_store_ids[idx]
-            store_name = to_store_name(store_id)
-            products = res or []
-            # Serper fallback if Sonar returned nothing
-            if not products and serper.is_available():
-                try:
-                    serper_products = await serper.search_shopping_products(query, store_name, "United States")
-                    for sp in serper_products:
-                        all_offers.append({
-                            "store_id": store_id,
-                            "store_name": store_name,
-                            "name": sp.get("name"),
-                            "brand": None,
-                            "size": None,
-                            "price": sp.get("price"),
-                            "availability": sp.get("availability"),
-                            "image_url": sp.get("image_url"),
-                            "product_url": sp.get("product_url"),
-                            "source": ["serper_shopping"]
-                        })
-                except Exception as e:
-                    logger.warning(f"serper_fallback_error store={store_id} err={e}")
-                continue
+            store_id, store_name, products = res
             for p in products:
                 all_offers.append({
                     "store_id": store_id,
@@ -516,30 +373,13 @@ async def aggregate_products(
                     "source": ["perplexity_sonar"]
                 })
 
-        # Improved normalization and aggregation by (brand, normalized_name, normalized_size)
-        def norm_text(s: Optional[str]) -> str:
-            return (s or "").lower().strip()
-
-        def norm_name(name: Optional[str]) -> str:
-            n = norm_text(name)
-            # remove common stop words and punctuation dashes
-            for token in ["brand", "original", "the"]:
-                n = n.replace(f" {token} ", " ")
-            n = n.replace("-", " ")
-            n = " ".join(n.split())
-            return n
-
-        def norm_size(size: Optional[str]) -> str:
-            s = norm_text(size)
-            s = s.replace("fluid ounces", "fl oz").replace("fluid ounce", "fl oz").replace("ounces", "oz").replace("ounce", "oz")
-            s = s.replace("fl. oz", "fl oz").replace("fl-oz", "fl oz")
-            s = s.replace("packs", "pack").replace(" ct", " count").replace("ct", "count")
-            s = " ".join(s.split())
-            return s
+        # Simple aggregation by (brand, name, size)
+        def norm(s: Optional[str]) -> str:
+            return (s or "").strip().lower()
 
         grouped = {}
         for o in all_offers:
-            key_parts = (norm_text(o.get("brand")), norm_name(o.get("name")), norm_size(o.get("size")))
+            key_parts = (norm(o.get("brand")), norm(o.get("name")), norm(o.get("size")))
             gkey = "|".join(key_parts)
             if gkey not in grouped:
                 grouped[gkey] = {
@@ -568,9 +408,8 @@ async def aggregate_products(
             "source": "aggregate(sonar)"
         }
 
-        logger.info(f"cache_miss aggregate zip={zipcode} q='{query}' -> setting cache")
         await cache.set_json(key, response, ttl_seconds=60 * 60 * 4)
-        return {**response, "cache": {"hit": False}}
+        return response
     except HTTPException:
         raise
     except Exception as e:

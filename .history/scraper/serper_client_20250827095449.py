@@ -61,12 +61,6 @@ class SerperClient:
                 "ALDI": "aldi.us",
                 "Costco": "costco.com",
                 "Kroger": "kroger.com",
-                "kroger": "kroger.com",
-                "target": "target.com",
-                "walmart": "walmart.com",
-                "whole_foods": "wholefoodsmarket.com",
-                "aldi": "aldi.us",
-                "costco": "costco.com",
             }
             if store_name:
                 domain = domain_map.get(store_name, None)
@@ -185,7 +179,6 @@ class SerperClient:
                     "walmart": "walmart.com",
                     "whole foods market": "wholefoodsmarket.com",
                     "whole foods": "wholefoodsmarket.com",
-                    "whole_foods": "wholefoodsmarket.com",
                     "aldi": "aldi.us",
                     "costco": "costco.com",
                     "kroger": "kroger.com",

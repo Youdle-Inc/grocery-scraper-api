@@ -138,7 +138,7 @@ class LocationService:
             allowed = set(chains)
         normalized: List[StoreLocation] = []
         for s in stores:
-            store_id = (s.store_id or s.store_name or "").lower().replace(" ", "_")
+            store_id = (s.store_id or "").lower().replace(" ", "_")
             canonical = STORE_ALIASES.get(store_id, store_id)
             if canonical in allowed or canonical in CANONICAL_STORES:
                 s.store_id = canonical

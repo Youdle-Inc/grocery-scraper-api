@@ -31,8 +31,6 @@ STORE_ALIASES = {
     "sam's_club": "sams_club",
     # Whole Foods / Amazon
     "wholefoods": "whole_foods",
-    "whole_foods_market": "whole_foods",
-    "wholefoods_market": "whole_foods",
     "amazon_fresh": "whole_foods",
 }
 

@@ -180,16 +180,16 @@ class SerperClient:
             # Determine expected domain if store filter provided
             expected_domain = None
             if store_name:
-                domain_map = {
-                    "target": "target.com",
-                    "walmart": "walmart.com",
-                    "whole foods market": "wholefoodsmarket.com",
-                    "whole foods": "wholefoodsmarket.com",
-                    "whole_foods": "wholefoodsmarket.com",
-                    "aldi": "aldi.us",
-                    "costco": "costco.com",
-                    "kroger": "kroger.com",
-                }
+                            domain_map = {
+                "target": "target.com",
+                "walmart": "walmart.com",
+                "whole foods market": "wholefoodsmarket.com",
+                "whole foods": "wholefoodsmarket.com",
+                "whole_foods": "wholefoodsmarket.com",
+                "aldi": "aldi.us",
+                "costco": "costco.com",
+                "kroger": "kroger.com",
+            }
                 expected_domain = domain_map.get(store_name.lower())
             
             for result in shopping_results:

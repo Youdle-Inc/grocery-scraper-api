@@ -339,8 +339,7 @@ async def aggregate_products(
     zipcode: str,
     radius_miles: int = 10,
     stores: Optional[str] = None,
-    enhance: bool = False,
-    refresh: bool = False
+    enhance: bool = False
 ):
     """Product-first search across multiple stores in a zipcode with caching."""
     try:
@@ -365,8 +364,8 @@ async def aggregate_products(
 
         # Cache lookup for aggregated products
         key = products_key(zipcode, query, considered_store_ids, enhance)
-        cached = None if refresh else await cache.get_json(key)
-        if cached and not refresh:
+        cached = await cache.get_json(key)
+        if cached:
             logger.info(f"cache_hit aggregate zip={zipcode} q='{query}'")
             # Near-stale refresh: if TTL < 20% of full, refresh in background
             ttl = await cache.ttl_seconds(key)
@@ -395,11 +394,6 @@ async def aggregate_products(
                 "sams_club": "Sam's Club",
                 "trader_joes": "Trader Joe's",
                 "ahold_delhaize": "Stop & Shop",
-                "kroger": "Kroger",
-                "target": "Target",
-                "walmart": "Walmart",
-                "costco": "Costco",
-                "aldi": "ALDI",
             }
             if store_id in mapping:
                 return mapping[store_id]
@@ -407,46 +401,10 @@ async def aggregate_products(
 
         async def fetch_store(store_id: str):
             async with semaphore:
-                try:
-                    # Get Sonar results
-                    sonar_results = await asyncio.wait_for(
-                        sonar_client.search_products(query, to_store_name(store_id), zipcode, enhance=False),  # Don't use Sonar's enhance
-                        timeout=20
-                    )
-                    
-                    # If enhance is requested, add Serper enhancement
-                    if enhance and serper.is_available():
-                        try:
-                            # Enhance each product with Serper data
-                            enhanced_results = []
-                            for product in sonar_results:
-                                enhanced_product = product.copy()
-                                product_name = product.get('name', '')
-                                
-                                # Search Serper for this specific product
-                                serper_products = await serper.search_shopping_products(product_name, to_store_name(store_id), "United States")
-                                
-                                # Find best match and enhance
-                                if serper_products:
-                                    best_match = serper_products[0]  # Take first match for now
-                                    enhanced_product.update({
-                                        'product_url': best_match.get('product_url', enhanced_product.get('product_url')),
-                                        'image_url': best_match.get('image_url', enhanced_product.get('image_url')),
-                                        'price': best_match.get('price', enhanced_product.get('price')),
-                                        'availability': best_match.get('availability', enhanced_product.get('availability')),
-                                        'source': ['perplexity_sonar', 'serper_shopping']
-                                    })
-                                
-                                enhanced_results.append(enhanced_product)
-                            
-                            return enhanced_results
-                        except Exception as e:
-                            logger.warning(f"serper_enhancement_error store={store_id} err={repr(e)}")
-                            return sonar_results
-                    
-                    return sonar_results
-                except Exception as e:
-                    raise e
+                return await asyncio.wait_for(
+                    sonar_client.search_products(query, to_store_name(store_id), zipcode, enhance),
+                    timeout=20
+                )
 
         tasks = [fetch_store(sid) for sid in considered_store_ids]
         raw_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -456,28 +414,7 @@ async def aggregate_products(
         serper = SerperClient()
         for idx, res in enumerate(raw_results):
             if isinstance(res, Exception):
-                store_id = considered_store_ids[idx]
-                store_name = to_store_name(store_id)
-                logger.warning(f"aggregate_store_error store={store_id} err={repr(res)}")
-                # Serper fallback on error
-                if serper.is_available():
-                    try:
-                        serper_products = await serper.search_shopping_products(query, store_name, "United States")
-                        for sp in serper_products:
-                            all_offers.append({
-                                "store_id": store_id,
-                                "store_name": store_name,
-                                "name": sp.get("name"),
-                                "brand": None,
-                                "size": None,
-                                "price": sp.get("price"),
-                                "availability": sp.get("availability"),
-                                "image_url": sp.get("image_url"),
-                                "product_url": sp.get("product_url"),
-                                "source": ["serper_shopping"]
-                            })
-                    except Exception as e:
-                        logger.warning(f"serper_fallback_error store={store_id} err={repr(e)}")
+                logger.warning(f"aggregate_store_error store={considered_store_ids[idx]} err={res}")
                 continue
             store_id = considered_store_ids[idx]
             store_name = to_store_name(store_id)
