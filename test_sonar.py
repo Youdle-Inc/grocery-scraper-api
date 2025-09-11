@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test script for the Grocery Scraper API with Perplexity Sonar and Serper.dev integration.
+Test script for the Grocery Scraper API with Perplexity Sonar and Exa API integration.
 """
 
 import requests
@@ -129,11 +129,11 @@ def test_product_search(query: str, store_name: str, location: str):
         print(f"❌ Product search error: {e}")
         return []
 
-def test_serper_integration():
-    """Test Serper.dev integration specifically."""
-    print(f"\n🔗 Testing Serper.dev Integration...")
+def test_exa_integration():
+    """Test Exa API integration specifically."""
+    print(f"\n🔗 Testing Exa API Integration...")
     
-    # Test with a simple product search that should trigger Serper.dev
+    # Test with a simple product search that should trigger Exa API
     products = test_product_search("milk", "Target", "Chicago, IL")
     
     if products:
@@ -141,18 +141,18 @@ def test_serper_integration():
         real_urls = sum(1 for p in products if p.get('product_url'))
         real_images = sum(1 for p in products if p.get('image_url'))
         
-        print(f"\n📊 Serper.dev Integration Results:")
+        print(f"\n📊 Exa API Integration Results:")
         print(f"   Products with real URLs: {real_urls}/{len(products)}")
         print(f"   Products with real images: {real_images}/{len(products)}")
         
         if real_urls > 0 and real_images > 0:
-            print("✅ Serper.dev integration working correctly!")
+            print("✅ Exa API integration working correctly!")
             return True
         else:
-            print("⚠️  Serper.dev integration may have issues")
+            print("⚠️  Exa API integration may have issues")
             return False
     else:
-        print("❌ Serper.dev integration test failed")
+        print("❌ Exa API integration test failed")
         return False
 
 def run_comprehensive_test():
@@ -180,8 +180,8 @@ def run_comprehensive_test():
             "New York, NY"
         )
         
-        # Test Serper.dev integration
-        serper_ok = test_serper_integration()
+        # Test Exa API integration
+        exa_ok = test_exa_integration()
         
         # Summary
         print("\n" + "=" * 50)
@@ -190,9 +190,9 @@ def run_comprehensive_test():
         print(f"   API Info: {'✅' if info_ok else '❌'}")
         print(f"   Store Discovery: {'✅' if stores else '❌'} ({len(stores)} stores)")
         print(f"   Product Search: {'✅' if products else '❌'} ({len(products) if products else 0} products)")
-        print(f"   Serper.dev Integration: {'✅' if serper_ok else '❌'}")
+        print(f"   Exa API Integration: {'✅' if exa_ok else '❌'}")
         
-        return all([health_ok, info_ok, stores, products, serper_ok])
+        return all([health_ok, info_ok, stores, products, exa_ok])
     else:
         print("❌ Store discovery failed - cannot test product search")
         return False
@@ -243,7 +243,7 @@ def test_specific_scenarios():
 
 if __name__ == "__main__":
     print("🛒 Grocery Scraper API Test Suite")
-    print("Testing Perplexity Sonar + Serper.dev Integration")
+    print("Testing Perplexity Sonar + Exa API Integration")
     print("=" * 60)
     
     # Run comprehensive test
