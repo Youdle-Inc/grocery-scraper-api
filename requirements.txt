@@ -22,8 +22,5 @@ selenium-stealth==1.0.6
 # Image Scraping
 aiohttp==3.9.1
 
-# Token counting
-tiktoken==0.5.1
-
 # Caching
 redis==5.0.1
