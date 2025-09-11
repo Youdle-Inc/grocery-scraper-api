@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Serper API Client for getting real product URLs and image links
+Exa API Client for getting real product URLs and image links
 """
 
 import asyncio
@@ -16,27 +16,27 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-class SerperClient:
-    """Client for Serper API to get real product URLs and image links"""
+class ExaClient:
+    """Client for Exa API to get real product URLs and image links"""
     
     def __init__(self):
-        self.api_key = os.getenv("SERPER_API_KEY")
-        self.base_url = "https://google.serper.dev/search"
+        self.api_key = os.getenv("EXA_API_KEY")
+        self.base_url = "https://api.exa.ai"
         
         if not self.api_key:
-            logger.warning("⚠️ No SERPER_API_KEY found in .env file")
+            logger.warning("⚠️ No EXA_API_KEY found in .env file")
             self._available = False
         else:
-            logger.info("✅ Serper.dev client initialized")
+            logger.info("✅ Exa API client initialized")
             self._available = True
     
     def is_available(self) -> bool:
-        """Check if Serper API is available"""
+        """Check if Exa API is available"""
         return self._available and self.api_key is not None
     
-    async def search_shopping_products(self, query: str, store_name: str = None, location: str = "United States") -> List[Dict[str, Any]]:
+    async def search_products(self, query: str, store_name: str = None, location: str = "United States") -> List[Dict[str, Any]]:
         """
-        Search for products using Google Shopping via Serper API
+        Search for products using Exa API
         
         Args:
             query: Product search query
@@ -47,7 +47,7 @@ class SerperClient:
             List of products with real URLs and image links
         """
         if not self.is_available():
-            logger.warning("⚠️ Serper API not available")
+            logger.warning("⚠️ Exa API not available")
             return []
         
         try:
@@ -75,108 +75,94 @@ class SerperClient:
                 else:
                     search_query = f"{query} {store_name}"
             
-            # Serper.dev uses POST with JSON body
+            # Exa API uses POST with JSON body
             headers = {
-                'X-API-KEY': self.api_key,
+                'Authorization': f'Bearer {self.api_key}',
                 'Content-Type': 'application/json'
             }
             
             data = {
-                'q': search_query,
-                'gl': 'us',
-                'hl': 'en',
-                'num': 20,
-                'type': 'shopping'  # For Google Shopping results
+                'query': search_query,
+                'numResults': 20,
+                'includeDomains': [],
+                'excludeDomains': [],
+                'useAutoprompt': True,
+                'type': 'keyword'  # Use keyword search for product discovery
             }
             
-            logger.info(f"🔍 Searching Serper for: {search_query}")
+            logger.info(f"🔍 Searching Exa for: {search_query}")
             
             # Make the request
             response = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: requests.post(self.base_url, headers=headers, json=data, timeout=30)
+                lambda: requests.post(f"{self.base_url}/search", headers=headers, json=data, timeout=30)
             )
             
             if response.status_code == 200:
                 data = response.json()
-                products = self._parse_shopping_results(data, store_name)
-                logger.info(f"✅ Found {len(products)} products via Serper")
+                products = self._parse_search_results(data, store_name)
+                logger.info(f"✅ Found {len(products)} products via Exa")
                 return products
             elif response.status_code == 401:
-                logger.error("❌ Invalid Serper.dev API key - please check your account and regenerate the key")
+                logger.error("❌ Invalid Exa API key - please check your account and regenerate the key")
                 return []
             else:
-                logger.error(f"❌ Serper API error: {response.status_code} - {response.text}")
+                logger.error(f"❌ Exa API error: {response.status_code} - {response.text}")
                 return []
                 
         except Exception as e:
-            logger.error(f"❌ Serper search failed: {e}")
+            logger.error(f"❌ Exa search failed: {e}")
             return []
     
-    async def search_product_images(self, query: str, store_name: str = None) -> List[str]:
+    async def get_contents(self, urls: List[str]) -> List[Dict[str, Any]]:
         """
-        Search for product images using Google Images via Serper API
+        Get contents from URLs using Exa API
         
         Args:
-            query: Product search query
-            store_name: Optional store name to filter results
+            urls: List of URLs to get contents from
             
         Returns:
-            List of image URLs
+            List of content objects with parsed data
         """
         if not self.is_available():
             return []
         
         try:
-            # Build search query
-            search_query = query
-            if store_name:
-                search_query = f"{query} {store_name} product"
-            
-            # Serper.dev uses POST with JSON body
             headers = {
-                'X-API-KEY': self.api_key,
+                'Authorization': f'Bearer {self.api_key}',
                 'Content-Type': 'application/json'
             }
             
             data = {
-                'q': search_query,
-                'gl': 'us',
-                'hl': 'en',
-                'num': 10,
-                'type': 'images'  # For Google Images results
+                'urls': urls,
+                'includeImages': True,
+                'includeLinks': True
             }
             
-            logger.info(f"🖼️ Searching Serper images for: {search_query}")
+            logger.info(f"📄 Getting contents for {len(urls)} URLs via Exa")
             
-            # Make the request
             response = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: requests.post(self.base_url, headers=headers, json=data, timeout=30)
+                lambda: requests.post(f"{self.base_url}/contents", headers=headers, json=data, timeout=30)
             )
             
             if response.status_code == 200:
                 data = response.json()
-                image_urls = self._parse_image_results(data)
-                logger.info(f"✅ Found {len(image_urls)} images via Serper")
-                return image_urls
-            elif response.status_code == 401:
-                logger.error("❌ Invalid Serper.dev API key - please check your account and regenerate the key")
-                return []
+                return data.get('contents', [])
             else:
-                logger.error(f"❌ Serper image search error: {response.status_code}")
+                logger.error(f"❌ Exa contents error: {response.status_code}")
                 return []
                 
         except Exception as e:
-            logger.error(f"❌ Serper image search failed: {e}")
+            logger.error(f"❌ Exa contents failed: {e}")
             return []
     
-    def _parse_shopping_results(self, data: Dict[str, Any], store_name: str = None) -> List[Dict[str, Any]]:
-        """Parse Serper.dev shopping search results"""
+    def _parse_search_results(self, data: Dict[str, Any], store_name: str = None) -> List[Dict[str, Any]]:
+        """Parse Exa search results"""
         products = []
         
         try:
-            shopping_results = data.get('shopping', [])
+            results = data.get('results', [])
             # Determine expected domain if store filter provided
             expected_domain = None
             if store_name:
@@ -192,21 +178,18 @@ class SerperClient:
                 }
                 expected_domain = domain_map.get(store_name.lower())
             
-            for result in shopping_results:
+            for result in results:
+                # Extract product information from search result
                 product = {
                     'name': result.get('title', ''),
-                    'price': self._extract_price(result.get('price', '')),
-                    'currency': 'USD',  # Serper.dev doesn't provide currency separately
-                    'product_url': result.get('link', ''),
+                    'price': self._extract_price(result.get('text', '')),
+                    'currency': 'USD',
+                    'product_url': result.get('url', ''),
                     'image_url': result.get('imageUrl', ''),
                     'source': result.get('source', ''),
-                    'rating': result.get('rating', None),
-                    'reviews_count': result.get('ratingCount', None),
-                    'availability': 'In Stock',  # Assume in stock for Google Shopping results
-                    'shipping': 'Free shipping',  # Default assumption
-                    'condition': 'New',
-                    'serper_product_id': result.get('productId', ''),
-                    'serper_source': 'serper_shopping'
+                    'description': result.get('text', ''),
+                    'availability': 'In Stock',  # Assume in stock for search results
+                    'exa_source': 'exa_search'
                 }
                 
                 # Filter by store domain if specified
@@ -222,36 +205,19 @@ class SerperClient:
                 products.append(product)
                 
         except Exception as e:
-            logger.error(f"❌ Failed to parse Serper shopping results: {e}")
+            logger.error(f"❌ Failed to parse Exa search results: {e}")
         
         return products
     
-    def _parse_image_results(self, data: Dict[str, Any]) -> List[str]:
-        """Parse Serper.dev image search results"""
-        image_urls = []
-        
+    def _extract_price(self, text: str) -> Optional[float]:
+        """Extract numeric price from text"""
         try:
-            image_results = data.get('images', [])
-            
-            for result in image_results:
-                image_url = result.get('imageUrl', '')
-                if image_url and image_url.startswith('http'):
-                    image_urls.append(image_url)
-                    
-        except Exception as e:
-            logger.error(f"❌ Failed to parse Serper image results: {e}")
-        
-        return image_urls
-    
-    def _extract_price(self, price_str: str) -> Optional[float]:
-        """Extract numeric price from price string"""
-        try:
-            if not price_str:
+            if not text:
                 return None
             
             # Remove currency symbols and extract number
             import re
-            price_match = re.search(r'[\d,]+\.?\d*', price_str.replace(',', ''))
+            price_match = re.search(r'[\d,]+\.?\d*', text.replace(',', ''))
             if price_match:
                 return float(price_match.group())
             
@@ -259,9 +225,9 @@ class SerperClient:
         except:
             return None
     
-    async def enhance_products_with_serper(self, products: List[Dict[str, Any]], store_name: str, location: str = "United States") -> List[Dict[str, Any]]:
+    async def enhance_products_with_exa(self, products: List[Dict[str, Any]], store_name: str, location: str = "United States") -> List[Dict[str, Any]]:
         """
-        Enhance products from Perplexity with real URLs and images from Serper
+        Enhance products from Perplexity with real URLs and images from Exa
         
         Args:
             products: List of products from Perplexity
@@ -272,7 +238,7 @@ class SerperClient:
             Enhanced products with real URLs and images
         """
         if not self.is_available():
-            logger.warning("⚠️ Serper API not available, skipping enhancement")
+            logger.warning("⚠️ Exa API not available, skipping enhancement")
             return products
         
         enhanced_products = []
@@ -283,35 +249,24 @@ class SerperClient:
             
             try:
                 # Search for this specific product
-                serper_products = await self.search_shopping_products(product_name, store_name, location)
+                exa_products = await self.search_products(product_name, store_name, location)
                 
                 # Find best match
-                best_match = self._find_best_product_match(product, serper_products)
+                best_match = self._find_best_product_match(product, exa_products)
                 
                 if best_match:
-                    # Enhance with Serper data
+                    # Enhance with Exa data
                     enhanced_product.update({
                         'product_url': best_match.get('product_url', enhanced_product.get('product_url')),
                         'image_url': best_match.get('image_url', enhanced_product.get('image_url')),
-                        'serper_product_id': best_match.get('serper_product_id'),
-                        'serper_source': best_match.get('serper_source'),
+                        'exa_source': best_match.get('exa_source'),
                         'real_price': best_match.get('price'),
                         'real_currency': best_match.get('currency'),
-                        'real_rating': best_match.get('rating'),
-                        'real_reviews_count': best_match.get('reviews_count'),
-                        'real_availability': best_match.get('availability'),
-                        'real_shipping': best_match.get('shipping'),
-                        'real_condition': best_match.get('condition')
+                        'real_description': best_match.get('description'),
+                        'real_availability': best_match.get('availability')
                     })
                     
-                    logger.info(f"✅ Enhanced {product_name} with Serper data")
-                else:
-                    # Try to get just images if no product match
-                    image_urls = await self.search_product_images(product_name, store_name)
-                    if image_urls:
-                        enhanced_product['image_url'] = image_urls[0]
-                        enhanced_product['serper_source'] = 'serper_images'
-                        logger.info(f"🖼️ Added image for {product_name}")
+                    logger.info(f"✅ Enhanced {product_name} with Exa data")
                 
             except Exception as e:
                 logger.warning(f"⚠️ Failed to enhance {product_name}: {e}")
@@ -320,9 +275,9 @@ class SerperClient:
         
         return enhanced_products
     
-    def _find_best_product_match(self, perplexity_product: Dict[str, Any], serper_products: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """Find the best matching product between Perplexity and Serper results"""
-        if not serper_products:
+    def _find_best_product_match(self, perplexity_product: Dict[str, Any], exa_products: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Find the best matching product between Perplexity and Exa results"""
+        if not exa_products:
             return None
         
         product_name = perplexity_product.get('name', '').lower()
@@ -331,34 +286,34 @@ class SerperClient:
         best_match = None
         best_score = 0
         
-        for serper_product in serper_products:
-            serper_name = serper_product.get('name', '').lower()
+        for exa_product in exa_products:
+            exa_name = exa_product.get('name', '').lower()
             
             # Calculate similarity score
             name_words = set(product_name.split())
-            serper_words = set(serper_name.split())
+            exa_words = set(exa_name.split())
             
             # Count common words
-            common_words = name_words.intersection(serper_words)
-            score = len(common_words) / max(len(name_words), len(serper_words))
+            common_words = name_words.intersection(exa_words)
+            score = len(common_words) / max(len(name_words), len(exa_words))
             
             # Bonus for brand match
-            if product_brand and product_brand in serper_name:
+            if product_brand and product_brand in exa_name:
                 score += 0.3
             
             # Bonus for exact name match
-            if product_name in serper_name or serper_name in product_name:
+            if product_name in exa_name or exa_name in product_name:
                 score += 0.5
             
             if score > best_score and score > 0.2:  # At least 20% match
                 best_score = score
-                best_match = serper_product
+                best_match = exa_product
         
         return best_match
     
-    def _get_demo_shopping_results(self, query: str, store_name: str = None) -> List[Dict[str, Any]]:
-        """Get demo shopping results when API key is invalid"""
-        logger.info("🎭 Using demo mode for shopping results")
+    def _get_demo_search_results(self, query: str, store_name: str = None) -> List[Dict[str, Any]]:
+        """Get demo search results when API key is invalid"""
+        logger.info("🎭 Using demo mode for search results")
         
         # Generate realistic demo data based on the query
         demo_products = []
@@ -372,13 +327,9 @@ class SerperClient:
                     'product_url': 'https://www.target.com/p/organic-whole-milk-1-gallon/-/A-12345678',
                     'image_url': 'https://target.scene7.com/is/image/Target/GUEST_organic-milk-1gal',
                     'source': 'Target',
-                    'rating': 4.5,
-                    'reviews_count': 1250,
+                    'description': 'Organic whole milk from pasture-raised cows',
                     'availability': 'In Stock',
-                    'shipping': 'Free shipping',
-                    'condition': 'New',
-                    'serper_product_id': 'demo_123456',
-                    'serper_source': 'serper_demo'
+                    'exa_source': 'exa_demo'
                 },
                 {
                     'name': '2% Reduced Fat Milk - 1 Gallon',
@@ -387,13 +338,9 @@ class SerperClient:
                     'product_url': 'https://www.target.com/p/2-percent-milk-1-gallon/-/A-87654321',
                     'image_url': 'https://target.scene7.com/is/image/Target/GUEST_2percent-milk-1gal',
                     'source': 'Target',
-                    'rating': 4.3,
-                    'reviews_count': 890,
+                    'description': '2% reduced fat milk, great for everyday use',
                     'availability': 'In Stock',
-                    'shipping': 'Free shipping',
-                    'condition': 'New',
-                    'serper_product_id': 'demo_876543',
-                    'serper_source': 'serper_demo'
+                    'exa_source': 'exa_demo'
                 }
             ]
         elif "oat" in query.lower():
@@ -405,13 +352,9 @@ class SerperClient:
                     'product_url': 'https://www.target.com/p/oatly-original-oat-milk-32oz/-/A-11111111',
                     'image_url': 'https://target.scene7.com/is/image/Target/GUEST_oatly-original-32oz',
                     'source': 'Target',
-                    'rating': 4.7,
-                    'reviews_count': 2100,
+                    'description': 'Original oat milk made from Swedish oats',
                     'availability': 'In Stock',
-                    'shipping': 'Free shipping',
-                    'condition': 'New',
-                    'serper_product_id': 'demo_111111',
-                    'serper_source': 'serper_demo'
+                    'exa_source': 'exa_demo'
                 },
                 {
                     'name': 'Silk Original Oat Milk - 59 oz',
@@ -420,13 +363,9 @@ class SerperClient:
                     'product_url': 'https://www.target.com/p/silk-original-oat-milk-59oz/-/A-22222222',
                     'image_url': 'https://target.scene7.com/is/image/Target/GUEST_silk-oat-59oz',
                     'source': 'Target',
-                    'rating': 4.4,
-                    'reviews_count': 1560,
+                    'description': 'Original oat milk with a creamy texture',
                     'availability': 'In Stock',
-                    'shipping': 'Free shipping',
-                    'condition': 'New',
-                    'serper_product_id': 'demo_222222',
-                    'serper_source': 'serper_demo'
+                    'exa_source': 'exa_demo'
                 }
             ]
         else:
@@ -439,13 +378,9 @@ class SerperClient:
                     'product_url': f'https://www.target.com/p/{query.lower().replace(" ", "-")}/-/A-demo123',
                     'image_url': 'https://target.scene7.com/is/image/Target/GUEST_demo-product',
                     'source': 'Target',
-                    'rating': 4.0,
-                    'reviews_count': 500,
+                    'description': f'Demo product for {query}',
                     'availability': 'In Stock',
-                    'shipping': 'Free shipping',
-                    'condition': 'New',
-                    'serper_product_id': 'demo_generic',
-                    'serper_source': 'serper_demo'
+                    'exa_source': 'exa_demo'
                 }
             ]
         
@@ -454,16 +389,4 @@ class SerperClient:
             demo_products = [p for p in demo_products if store_name.lower() in p['source'].lower()]
         
         return demo_products
-    
-    def _get_demo_image_results(self, query: str) -> List[str]:
-        """Get demo image results when API key is invalid"""
-        logger.info("🎭 Using demo mode for image results")
-        
-        # Return some realistic demo image URLs
-        demo_images = [
-            'https://target.scene7.com/is/image/Target/GUEST_demo-product-1',
-            'https://target.scene7.com/is/image/Target/GUEST_demo-product-2',
-            'https://target.scene7.com/is/image/Target/GUEST_demo-product-3'
-        ]
-        
-        return demo_images
+

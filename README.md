@@ -1,6 +1,6 @@
 # 🛒 Grocery Scraper API
 
-A powerful AI-powered grocery product discovery API that combines **Perplexity Sonar** for intelligent product search with **Serper.dev** for real product URLs and images.
+A powerful AI-powered grocery product discovery API that combines **Perplexity Sonar** for intelligent product search with **Exa API** for real product URLs and images.
 
 ## ✨ Features
 
@@ -10,8 +10,8 @@ A powerful AI-powered grocery product discovery API that combines **Perplexity S
 - **Real-time Store Discovery**: Find grocery stores in any location with detailed information
 
 ### 🔗 Real Product Data
-- **Real Product URLs**: Direct links to Google Shopping product pages
-- **High-Quality Images**: Product images from Google's CDN
+- **Real Product URLs**: Direct links to product pages from Exa's web search
+- **High-Quality Images**: Product images from web search results
 - **Live Pricing**: Current prices from various retailers
 - **Customer Ratings**: Real ratings and review counts
 - **Store-Specific Results**: Filter by Target, Walmart, Safeway, and more
@@ -26,8 +26,8 @@ A powerful AI-powered grocery product discovery API that combines **Perplexity S
 
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   FastAPI App   │───▶│  Perplexity      │───▶│  Serper.dev     │
-│                 │    │  Sonar Client    │    │  Google Shopping│
+│   FastAPI App   │───▶│  Perplexity      │───▶│  Exa API        │
+│                 │    │  Sonar Client    │    │  Web Search     │
 └─────────────────┘    └──────────────────┘    └─────────────────┘
          │                       │                       │
          ▼                       ▼                       ▼
@@ -54,8 +54,8 @@ Create a `.env` file in the project root:
 # Required: Perplexity Sonar API Key
 PERPLEXITY_API_KEY=your_perplexity_api_key_here
 
-# Required: Serper.dev API Key (for real product URLs and images)
-SERPER_API_KEY=your_serper_api_key_here
+# Required: Exa API Key (for real product URLs and images)
+EXA_API_KEY=your_exa_api_key_here
 ```
 
 ### 3. Run the API
@@ -126,7 +126,7 @@ GET /sonar/products/search?query={product}&store_name={store}&location={location
       "reviews_count": 1250
     }
   ],
-  "source": "perplexity_sonar + serper_dev"
+          "source": "perplexity_sonar + exa_api"
 }
 ```
 
@@ -137,7 +137,7 @@ GET /sonar/products/search?query={product}&store_name={store}&location={location
 | Variable | Description | Required | Example |
 |----------|-------------|----------|---------|
 | `PERPLEXITY_API_KEY` | Perplexity Sonar API key | ✅ | `pplx-abc123...` |
-| `SERPER_API_KEY` | Serper.dev API key | ✅ | `80ff8a83e123e4ae68792aef4a946ee7335bd8ca` |
+| `EXA_API_KEY` | Exa API key | ✅ | `your_exa_api_key_here` |
 
 ### API Response Fields
 
@@ -162,7 +162,7 @@ grocery-scraper-api/
 ├── main.py                 # FastAPI application
 ├── scraper/
 │   ├── sonar_client.py     # Perplexity Sonar integration
-│   ├── serper_client.py    # Serper.dev integration
+│   ├── exa_client.py       # Exa API integration
 │   ├── models.py           # Pydantic models
 │   └── config.py           # Configuration
 ├── requirements.txt        # Python dependencies
@@ -176,8 +176,8 @@ grocery-scraper-api/
 - Parses AI-generated product information
 - Manages store discovery and product search
 
-#### SerperClient (`scraper/serper_client.py`)
-- Integrates with Serper.dev for Google Shopping data
+#### ExaClient (`scraper/exa_client.py`)
+- Integrates with Exa API for web search data
 - Provides real product URLs and images
 - Matches products by name similarity
 
@@ -186,8 +186,8 @@ grocery-scraper-api/
 # Test the API endpoints
 python test_sonar.py
 
-# Test Serper.dev integration
-python test_serper_integration.py
+# Test Exa API integration
+python test_exa_integration.py
 ```
 
 ## 🔍 How It Works
@@ -195,7 +195,7 @@ python test_serper_integration.py
 ### 1. Product Search Flow
 1. **User Request**: Search for "oat milk" at Target
 2. **Perplexity Sonar**: AI finds products with names, prices, descriptions
-3. **Serper.dev**: Gets real URLs and images from Google Shopping
+3. **Exa API**: Gets real URLs and images from web search
 4. **Smart Matching**: Matches products by name similarity
 5. **Response**: Returns combined data with real URLs and images
 
@@ -251,9 +251,9 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 - **Documentation**: Check this README and inline code comments
 - **Issues**: Create an issue on GitHub for bugs or feature requests
-- **API Keys**: Get help with Perplexity Sonar and Serper.dev setup
+- **API Keys**: Get help with Perplexity Sonar and Exa API setup
 
 ---
 
-**Built with ❤️ using FastAPI, Perplexity Sonar, and Serper.dev**
+**Built with ❤️ using FastAPI, Perplexity Sonar, and Exa API**
 

@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from .models import StoreLocation
 from .google_image_search import GoogleImageSearch
 from .hybrid_scraper import HybridScraper
-from .serper_client import SerperClient
+from .exa_client import ExaClient
 
 # Load environment variables from .env file
 load_dotenv()
@@ -190,18 +190,18 @@ Focus on current availability, accurate pricing, and finding actual product imag
             # Enhance products with real URLs
             products = self._enhance_products_with_real_urls(products, real_urls)
             
-            # Enhance products with Serper API for real URLs and images
+            # Enhance products with Exa API for real URLs and images
             try:
-                logger.info("🔍 Enhancing products with Serper API...")
-                serper_client = SerperClient()
-                logger.info(f"🔍 Serper client available: {serper_client.is_available()}")
-                if serper_client.is_available():
-                    products = await serper_client.enhance_products_with_serper(products, store_name, location)
-                    logger.info("✅ Serper enhancement completed")
+                logger.info("🔍 Enhancing products with Exa API...")
+                exa_client = ExaClient()
+                logger.info(f"🔍 Exa client available: {exa_client.is_available()}")
+                if exa_client.is_available():
+                    products = await exa_client.enhance_products_with_exa(products, store_name, location)
+                    logger.info("✅ Exa enhancement completed")
                 else:
-                    logger.info("⚠️ Serper API not available, skipping enhancement")
+                    logger.info("⚠️ Exa API not available, skipping enhancement")
             except Exception as e:
-                logger.warning(f"⚠️ Serper enhancement failed: {e}")
+                logger.warning(f"⚠️ Exa enhancement failed: {e}")
             
             # Enhance products with hybrid scraping (images + additional data) - OPTIONAL
             # Only enable if explicitly requested

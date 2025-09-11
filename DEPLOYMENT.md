@@ -85,10 +85,24 @@ git push heroku main
 docker build -t grocery-scraper-api .
 
 # Run locally
-docker run -p 8000:8000 grocery-scraper-api
+docker run -e CORS_ALLOW_ORIGINS="http://localhost:3000" -p 8000:8000 grocery-scraper-api
 
 # Deploy to any Docker hosting service
 ```
+
+### Gunicorn (Production) Command
+
+Use Gunicorn with Uvicorn workers for production:
+
+```bash
+gunicorn -k uvicorn.workers.UvicornWorker -w 2 -b 0.0.0.0:8000 main:app
+```
+
+Set environment variables:
+
+- `CORS_ALLOW_ORIGINS` (comma-separated list)
+- `PERPLEXITY_API_KEY`
+- `EXA_API_KEY`
 
 ## Environment Variables for Production
 

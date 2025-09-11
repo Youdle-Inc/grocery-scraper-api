@@ -104,3 +104,95 @@ class LocationSearchResponse(BaseModel):
     alternatives: List[ProductListing]  # alternative products
     search_metadata: Dict[str, Any]
     timestamp: datetime
+
+
+# === Response models for FastAPI endpoints ===
+
+class HealthServiceStatus(BaseModel):
+    perplexity_sonar: str
+    exa_api: str
+
+class HealthResponse(BaseModel):
+    status: str
+    timestamp: str
+    version: str
+    services: HealthServiceStatus
+
+class StoreLocationLite(BaseModel):
+    store_id: str
+    store_name: str
+    address: Optional[str] = None
+    services: Optional[List[str]] = None
+    status: Optional[str] = None
+    zipcode: Optional[str] = None
+    website: Optional[str] = None
+    location: Optional[Dict[str, Optional[str]]] = None
+
+class StoresResponse(BaseModel):
+    zipcode: str
+    stores_found: int
+    search_timestamp: str
+    stores: List[StoreLocationLite]
+    source: str
+    api_version: str
+    cache: Optional[Dict[str, Any]] = None
+
+class StoreDetailsResponse(BaseModel):
+    store_name: str
+    location: str
+    details: Dict[str, Any]
+    source: str
+
+class ProductLite(BaseModel):
+    name: Optional[str] = None
+    price: Optional[float | str] = None
+    availability: Optional[str] = None
+    category: Optional[str] = None
+    brand: Optional[str] = None
+    size: Optional[str] = None
+    description: Optional[str] = None
+    image_url: Optional[str] = None
+    product_url: Optional[str] = None
+    nutritional_info: Optional[Dict[str, Any]] = None
+    ingredients: Optional[List[str]] = None
+    allergens: Optional[List[str]] = None
+    online_available: Optional[bool] = None
+    in_store_only: Optional[bool] = None
+    reviews_count: Optional[int | str] = None
+    rating: Optional[float | str] = None
+
+class ProductsSearchResponse(BaseModel):
+    query: str
+    store_name: str
+    location: str
+    products_found: int
+    search_timestamp: str
+    products: List[ProductLite]
+    source: str
+    api_version: str
+
+class Offer(BaseModel):
+    store_id: str
+    store_name: str
+    price: Optional[float | str] = None
+    availability: Optional[str] = None
+    product_url: Optional[str] = None
+    source: List[str]
+
+class CanonicalProduct(BaseModel):
+    name: Optional[str] = None
+    brand: Optional[str] = None
+    size: Optional[str] = None
+    images: List[str] = []
+
+class AggregateResult(BaseModel):
+    canonical_product: CanonicalProduct
+    offers: List[Offer]
+
+class AggregateResponse(BaseModel):
+    query: str
+    zipcode: str
+    stores_considered: List[str]
+    results: List[AggregateResult]
+    source: str
+    cache: Optional[Dict[str, Any]] = None
