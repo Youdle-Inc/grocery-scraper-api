@@ -34,6 +34,11 @@ STORE_ALIASES = {
     "whole_foods_market": "whole_foods",
     "wholefoods_market": "whole_foods",
     "amazon_fresh": "whole_foods",
+    # Regional chains
+    "marianos": "kroger",  # Mariano's is owned by Kroger
+    "mariano's": "kroger",
+    "go_grocer": "target",  # Go Grocer is a convenience store chain
+    "municipal_market": "target",  # Local market
 }
 
 # Store configurations with working selectors and URLs

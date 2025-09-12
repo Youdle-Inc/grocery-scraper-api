@@ -139,7 +139,24 @@ class LocationService:
         normalized: List[StoreLocation] = []
         for s in stores:
             store_id = (s.store_id or s.store_name or "").lower().replace(" ", "_")
+            
+            # Try exact match first
             canonical = STORE_ALIASES.get(store_id, store_id)
+            
+            # If no exact match, try partial matching
+            if canonical not in allowed and canonical not in CANONICAL_STORES:
+                for alias, canonical_id in STORE_ALIASES.items():
+                    if alias in store_id or store_id.startswith(alias):
+                        canonical = canonical_id
+                        break
+            
+            # If still no match, try direct canonical store matching
+            if canonical not in allowed and canonical not in CANONICAL_STORES:
+                for canonical_store in CANONICAL_STORES:
+                    if canonical_store in store_id or store_id.startswith(canonical_store):
+                        canonical = canonical_store
+                        break
+            
             if canonical in allowed or canonical in CANONICAL_STORES:
                 s.store_id = canonical
                 normalized.append(s)
