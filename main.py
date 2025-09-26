@@ -460,6 +460,89 @@ async def aggregate_products(
                 return mapping[store_id]
             return store_id.replace("_", " ").title()
 
+        # Get store addresses for all considered stores
+        store_addresses = {}
+        try:
+            # Fetch store information for all considered stores
+            for store_id in considered_store_ids:
+                store_name = to_store_name(store_id)
+                try:
+                    # Get store details from Sonar to get address
+                    store_details = await sonar_client.get_store_details(store_name, zipcode)
+                    address = ''
+                    
+                    # Debug logging to understand the response structure
+                    logger.info(f"Store details for {store_id} ({store_name}): {type(store_details)} - {store_details}")
+                    
+                    # Additional debug for address extraction
+                    if store_details and isinstance(store_details, dict):
+                        logger.info(f"Available keys in store_details: {list(store_details.keys())}")
+                        for key in ['address', 'store_address', 'location', 'full_address']:
+                            if key in store_details:
+                                logger.info(f"Found {key}: {store_details[key]} (type: {type(store_details[key])})")
+                    
+                    if store_details:
+                        # Handle case where store_details might be a string
+                        if isinstance(store_details, str):
+                            try:
+                                import json
+                                store_details = json.loads(store_details)
+                            except:
+                                pass
+                        
+                        # Extract address from various possible fields
+                        if isinstance(store_details, dict):
+                            # Try different possible address field names
+                            address = (store_details.get('address') or 
+                                     store_details.get('store_address') or 
+                                     store_details.get('location') or 
+                                     store_details.get('full_address') or '')
+                            
+                            # Clean up the address if it contains JSON artifacts
+                            if isinstance(address, str):
+                                # Remove JSON string artifacts and clean up
+                                import re
+                                
+                                # Handle the specific case we're seeing: "address\": \"675 6th Ave, New York, NY 10010"
+                                # Extract just the address part after the colon and quotes
+                                if 'address\\": \\"' in address:
+                                    # Extract everything after "address\": \"
+                                    match = re.search(r'address\\": \\"([^"]+)', address)
+                                    if match:
+                                        address = match.group(1)
+                                elif 'address": "' in address:
+                                    # Extract everything after "address": "
+                                    match = re.search(r'address": "([^"]+)', address)
+                                    if match:
+                                        address = match.group(1)
+                                else:
+                                    # General cleanup for other JSON artifacts
+                                    address = re.sub(r'^"store_address":\s*"', '', address)
+                                    address = re.sub(r'",?\s*$', '', address)
+                                    address = re.sub(r'^"|"$', '', address)  # Remove leading/trailing quotes
+                                
+                                # Final cleanup
+                                address = address.strip()
+                                
+                                # Additional fallback: if it still contains JSON artifacts, try to extract just the address
+                                if '\\"' in address or '": "' in address:
+                                    # Try to find a pattern that looks like an address (contains numbers and common address words)
+                                    address_pattern = r'(\d+[^"]*(?:St|Ave|Rd|Blvd|Way|Dr|Ln|Ct|Pl|St|Avenue|Street|Road|Boulevard|Drive|Lane|Court|Place)[^"]*)'
+                                    match = re.search(address_pattern, address, re.IGNORECASE)
+                                    if match:
+                                        address = match.group(1).strip()
+                        
+                        store_addresses[store_id] = address
+                    else:
+                        store_addresses[store_id] = ''
+                except Exception as e:
+                    logger.warning(f"Could not get address for store {store_id}: {e}")
+                    store_addresses[store_id] = ''
+        except Exception as e:
+            logger.warning(f"Error fetching store addresses: {e}")
+            # Initialize with empty addresses if we can't fetch them
+            store_addresses = {store_id: '' for store_id in considered_store_ids}
+
         async def fetch_store(store_id: str):
             async with semaphore:
                 try:
@@ -528,7 +611,8 @@ async def aggregate_products(
                                 "availability": ep.get("availability"),
                                 "image_url": ep.get("image_url"),
                                 "product_url": ep.get("product_url"),
-                                "source": ["exa_search"]
+                                "source": ["exa_search"],
+                                "address": store_addresses.get(store_id, "")
                             })
                     except Exception as e:
                         logger.warning(f"exa_fallback_error store={store_id} err={repr(e)}")
@@ -551,7 +635,8 @@ async def aggregate_products(
                             "availability": ep.get("availability"),
                             "image_url": ep.get("image_url"),
                             "product_url": ep.get("product_url"),
-                            "source": ["exa_search"]
+                            "source": ["exa_search"],
+                            "address": store_addresses.get(store_id, "")
                         })
                 except Exception as e:
                     logger.warning(f"exa_fallback_error store={store_id} err={e}")
@@ -567,7 +652,8 @@ async def aggregate_products(
                     "availability": p.get("availability"),
                     "image_url": p.get("image_url"),
                     "product_url": p.get("product_url"),
-                    "source": ["perplexity_sonar"]
+                    "source": ["perplexity_sonar"],
+                    "address": store_addresses.get(store_id, "")
                 })
 
         # Improved normalization and aggregation by (brand, normalized_name, normalized_size)
@@ -611,7 +697,8 @@ async def aggregate_products(
                 "price": o.get("price"),
                 "availability": o.get("availability"),
                 "product_url": o.get("product_url"),
-                "source": o.get("source", [])
+                "source": o.get("source", []),
+                "address": store_addresses.get(o["store_id"], "")
             })
 
         response = {

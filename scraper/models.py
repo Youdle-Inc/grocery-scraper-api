@@ -178,6 +178,7 @@ class Offer(BaseModel):
     availability: Optional[str] = None
     product_url: Optional[str] = None
     source: List[str]
+    address: Optional[str] = None
 
 class CanonicalProduct(BaseModel):
     name: Optional[str] = None
