@@ -108,4 +108,3 @@ The response should now include address information in each offer:
 - The `address` field will be populated when store details are successfully retrieved from Sonar
 - If address fetching fails, the field will be empty but the endpoint will still work
 - Use `jq` for better JSON formatting (install with `brew install jq` on macOS)
-

@@ -83,4 +83,3 @@ echo "Check the responses above to verify that:"
 echo "1. Each offer includes an 'address' field"
 echo "2. Addresses are populated with actual store locations"
 echo "3. The response structure includes the new address information"
-

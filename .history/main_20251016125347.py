@@ -24,6 +24,7 @@ from scraper.models import (
     ProductsSearchResponse,
     AggregateResponse,
 )
+from scraper.google_image_search import GoogleImageSearch
 from scraper.image_scraper import ImageScraper
 
 # Configure logging
@@ -488,8 +489,8 @@ async def aggregate_products(
             except Exception:
                 return None
 
-        # Use shared session for lightweight scraper; use existing exa_client for image lookup
-        async with ImageScraper() as scraper:
+        # Use shared sessions for external lookups
+        async with GoogleImageSearch() as google_search, ImageScraper() as scraper:
             semaphore_enrich = asyncio.Semaphore(10)
 
             async def enrich_group(group: Dict[str, Any]) -> None:
@@ -512,28 +513,15 @@ async def aggregate_products(
                                 image_set.add(derived)
                                 break
 
-                    # 3) If still empty, query EXA for likely product images by name/brand
-                    if not image_set and exa_client.is_available():
-                        try:
-                            exa_query = " ".join([
-                                p for p in [canonical.get("brand"), canonical.get("name"), canonical.get("quantity")] if p
-                            ]) or (canonical.get("name") or "")
-                            exa_results = await exa_client.search_products_structured(
-                                query=exa_query,
-                                store_name=None,
-                                zipcode=None,
-                                num_results=5,
-                                include_location=False,
-                            )
-                            for r in exa_results:
-                                if r.get("image_url"):
-                                    image_set.add(r["image_url"])
-                                    break
-                                for ai in r.get("additional_images", []) or []:
-                                    image_set.add(ai)
-                                    break
-                        except Exception:
-                            pass
+                    # 3) If still empty, try Google Custom Search (if configured)
+                    if not image_set and google_search.is_available():
+                        img = await google_search.search_product_image(
+                            canonical.get("name") or "",
+                            canonical.get("brand") or None,
+                            None,
+                        )
+                        if img:
+                            image_set.add(img)
 
                     # 4) Fallback to lightweight scraper (best-effort)
                     if not image_set:

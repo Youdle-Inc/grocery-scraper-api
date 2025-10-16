@@ -146,25 +146,13 @@ class StoreDetailsResponse(BaseModel):
 class ProductLite(BaseModel):
     name: Optional[str] = None
     price: Optional[float | str] = None
-    currency: Optional[str] = "USD"
-    quantity: Optional[str] = None  # Product size/quantity (e.g., "1 gallon", "64 oz")
     availability: Optional[str] = None
     category: Optional[str] = None
     brand: Optional[str] = None
-    size: Optional[str] = None  # Deprecated - use quantity instead
+    size: Optional[str] = None
     description: Optional[str] = None
     image_url: Optional[str] = None
-    additional_images: Optional[List[str]] = None
     product_url: Optional[str] = None
-    
-    # Store information
-    store_name: Optional[str] = None
-    store_address: Optional[str] = None
-    store_city: Optional[str] = None
-    store_state: Optional[str] = None
-    store_zipcode: Optional[str] = None
-    
-    # Product details
     nutritional_info: Optional[Dict[str, Any]] = None
     ingredients: Optional[List[str]] = None
     allergens: Optional[List[str]] = None
@@ -172,9 +160,6 @@ class ProductLite(BaseModel):
     in_store_only: Optional[bool] = None
     reviews_count: Optional[int | str] = None
     rating: Optional[float | str] = None
-    
-    # Metadata
-    source: Optional[str] = "exa_structured"
 
 class ProductsSearchResponse(BaseModel):
     query: str
@@ -190,27 +175,15 @@ class Offer(BaseModel):
     store_id: str
     store_name: str
     price: Optional[float | str] = None
-    currency: Optional[str] = "USD"
-    quantity: Optional[str] = None
     availability: Optional[str] = None
     product_url: Optional[str] = None
-    image_url: Optional[str] = None
     source: List[str]
-    
-    # Store location details
-    address: Optional[str] = None
-    city: Optional[str] = None
-    state: Optional[str] = None
-    zipcode: Optional[str] = None
 
 class CanonicalProduct(BaseModel):
     name: Optional[str] = None
     brand: Optional[str] = None
-    quantity: Optional[str] = None  # Product size/quantity
-    size: Optional[str] = None  # Deprecated - use quantity
+    size: Optional[str] = None
     images: List[str] = []
-    description: Optional[str] = None
-    category: Optional[str] = None
 
 class AggregateResult(BaseModel):
     canonical_product: CanonicalProduct
