@@ -6,12 +6,10 @@ A professional FastAPI service for scraping grocery store product data
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from typing import List, Optional, Dict, Any
 import asyncio
 import os
-import pathlib
 from datetime import datetime
 import logging
 from dotenv import load_dotenv
@@ -104,7 +102,7 @@ app.add_middleware(
 )
 
 # Mount static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Static files removed for Vercel compatibility
 
 # Initialize services
 exa_client = ExaStructuredClient()
@@ -125,9 +123,56 @@ async def startup_event():
 
 @app.get("/", response_class=HTMLResponse, tags=["meta"])
 async def root():
-    """Root endpoint serving interactive API documentation"""
-    html_file = pathlib.Path("static/templates/index.html")
-    return html_file.read_text()
+    """Root endpoint serving simple API documentation"""
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Grocery Scraper API</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; background: #1a1a1a; color: #e0e0e0; }
+            .container { max-width: 800px; margin: 0 auto; }
+            h1 { color: #4CAF50; }
+            .endpoint { background: #2a2a2a; padding: 20px; margin: 20px 0; border-radius: 8px; }
+            .method { background: #4CAF50; color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
+            .url { font-family: monospace; color: #81C784; }
+            code { background: #333; padding: 2px 6px; border-radius: 4px; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🛒 Grocery Scraper API v2.0.0</h1>
+            <p>AI-powered grocery product discovery with Exa - structured data with real URLs and images</p>
+            
+            <div class="endpoint">
+                <h3><span class="method">GET</span> <span class="url">/health</span></h3>
+                <p>Check API health and service status</p>
+                <code>curl "https://grocery-scraper-api.vercel.app/health"</code>
+            </div>
+            
+            <div class="endpoint">
+                <h3><span class="method">GET</span> <span class="url">/stores/{zipcode}</span></h3>
+                <p>Find grocery stores in a specific ZIP code</p>
+                <code>curl "https://grocery-scraper-api.vercel.app/stores/10001"</code>
+            </div>
+            
+            <div class="endpoint">
+                <h3><span class="method">GET</span> <span class="url">/products/search</span></h3>
+                <p>Search for specific products with structured data</p>
+                <code>curl "https://grocery-scraper-api.vercel.app/products/search?query=organic%20milk&zipcode=10001"</code>
+            </div>
+            
+            <div class="endpoint">
+                <h3><span class="method">GET</span> <span class="url">/products/aggregate</span></h3>
+                <p>Compare products across multiple stores</p>
+                <code>curl "https://grocery-scraper-api.vercel.app/products/aggregate?query=pizza&zipcode=60622&stores=walmart,target"</code>
+            </div>
+            
+            <p><strong>Features:</strong> Exa-powered structured product search, real product URLs, high-quality images, store location discovery, smart product matching</p>
+        </div>
+    </body>
+    </html>
+    """
 
 @app.get("/api", tags=["meta"])
 async def api_info():
