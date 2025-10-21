@@ -9,13 +9,12 @@ import os
 import logging
 from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
-
-try:
-    from exa_py import Exa
-except ImportError:
-    Exa = None
+from exa_py import Exa
+from .prompt_templates import GroceryPrompts
+from .context_prompts import ContextPrompts
 
 load_dotenv()
+exa = Exa(os.getenv("EXA_API_KEY"))
 logger = logging.getLogger(__name__)
 
 
@@ -66,13 +65,74 @@ class ExaStructuredClient:
         """Get domain for store name"""
         return self.STORE_DOMAINS.get(store_name.lower().strip())
     
+    def _detect_product_category(self, query: str) -> str:
+        """Detect product category from search query"""
+        query_lower = query.lower()
+        
+        # Dairy products
+        if any(word in query_lower for word in ["milk", "cheese", "yogurt", "butter", "cream", "dairy"]):
+            return "dairy"
+        
+        # Produce
+        if any(word in query_lower for word in ["apple", "banana", "orange", "lettuce", "tomato", "onion", "carrot", "produce", "fruit", "vegetable"]):
+            return "produce"
+        
+        # Meat
+        if any(word in query_lower for word in ["beef", "chicken", "pork", "fish", "meat", "steak", "ground", "sausage", "bacon"]):
+            return "meat"
+        
+        # Frozen
+        if any(word in query_lower for word in ["frozen", "ice cream", "pizza", "frozen dinner", "frozen meal"]):
+            return "frozen"
+        
+        # Organic
+        if any(word in query_lower for word in ["organic", "natural", "non-gmo", "free range"]):
+            return "organic"
+        
+        return "generic"
+    
+    def _detect_search_context(self, query: str) -> str:
+        """Detect search context from user query"""
+        return ContextPrompts.detect_search_context(query)
+    
+    def _get_optimized_prompt(self, query: str, context: str = None) -> str:
+        """Get optimized prompt based on query context and category"""
+        # Auto-detect context if not provided
+        if not context:
+            context = self._detect_search_context(query)
+        
+        # Get context-specific prompt
+        context_prompt = ContextPrompts.get_context_prompt(context)
+        
+        # Get category-specific prompt
+        category = self._detect_product_category(query)
+        category_prompt = GroceryPrompts.get_category_prompt(category)
+        
+        # Combine context and category prompts
+        combined_prompt = f"{context_prompt}\n\nCategory-specific focus: {category_prompt}"
+        
+        # Add validation instructions
+        validation_instructions = """
+        
+        Validation requirements:
+        1. Price must be numeric (e.g., 4.99, not "$4.99")
+        2. Quantity must include units (e.g., "64 fl oz", "1 gallon")
+        3. Store address must be complete with city, state, ZIP
+        4. Availability must be current status
+        5. Ratings must be 1-5 scale
+        6. If information is incomplete, mark confidence level and provide best available data
+        """
+        
+        return combined_prompt + validation_instructions
+    
     async def search_products_structured(
         self,
         query: str,
         store_name: Optional[str] = None,
         zipcode: Optional[str] = None,
         num_results: int = 20,
-        include_location: bool = True
+        include_location: bool = True,
+        context: str = None
     ) -> List[Dict[str, Any]]:
         """
         Search for grocery products with structured data extraction
@@ -92,8 +152,12 @@ class ExaStructuredClient:
             return []
         
         try:
-            # Build search query
-            search_query = self._build_search_query(query, store_name, zipcode)
+            # Build search query with category-specific template
+            category = self._detect_product_category(query)
+            search_query = GroceryPrompts.build_enhanced_query(query, store_name or "grocery store", zipcode or "", category)
+            
+            # Get optimized prompt based on context and category
+            optimized_prompt = self._get_optimized_prompt(query, context)
             
             # Define structured schema for product data
             product_schema = {
@@ -158,24 +222,22 @@ class ExaStructuredClient:
                     "reviews_count": {
                         "type": "number",
                         "description": "Number of customer reviews"
+                    },
+                    "confidence_score": {
+                        "type": "number",
+                        "description": "Confidence in data accuracy (0-1)"
                     }
                 },
                 "required": ["product_name", "price"]
             }
             
-            logger.info(f"🔍 Searching Exa for: {search_query}")
+            logger.info(f"🔍 Searching Exa for: {search_query} (Category: {category}, Context: {context or 'auto-detected'})")
             
-            # Search with structured data extraction
+            # Search with minimal options
             search_options = {
                 "query": search_query,
                 "num_results": num_results,
-                "type": "keyword",  # Use keyword search for product discovery
-                "text": {"max_characters": 2000},
-                "summary": {
-                    "query": "Extract detailed product information including name, brand, price, quantity/size, availability, store details, and customer ratings",
-                    "schema": product_schema
-                },
-                "extras": {"imageLinks": 5}  # Get multiple image links
+                "type": "keyword"
             }
             
             # Add domain filter if store specified
@@ -201,15 +263,25 @@ class ExaStructuredClient:
             return []
     
     def _build_search_query(self, query: str, store_name: Optional[str], zipcode: Optional[str]) -> str:
-        """Build optimized search query"""
+        """Build optimized search query for better product discovery"""
         parts = [query]
         
+        # Add store context for better targeting
         if store_name:
-            parts.append(store_name)
+            parts.append(f"at {store_name}")
         
-        # Add product-specific keywords to improve results
-        if any(keyword in query.lower() for keyword in ["milk", "bread", "eggs", "cheese", "butter"]):
-            parts.append("grocery store")
+        # Add location context if provided
+        if zipcode:
+            parts.append(f"near {zipcode}")
+        
+        # Add grocery-specific keywords to improve results
+        grocery_keywords = ["milk", "bread", "eggs", "cheese", "butter", "meat", "produce", "frozen", "organic", "fresh"]
+        if any(keyword in query.lower() for keyword in grocery_keywords):
+            parts.append("grocery store product")
+        
+        # Add shopping context for better results
+        if not any(word in query.lower() for word in ["buy", "shop", "store", "grocery"]):
+            parts.append("buy online")
         
         return " ".join(parts)
     
@@ -359,7 +431,7 @@ class ExaStructuredClient:
                     [url],
                     text=True,
                     summary={
-                        "query": "Extract comprehensive product information including ingredients, nutrition, and customer reviews",
+                        "query": "Extract comprehensive grocery product details from the product page. Focus on: complete product name and brand, exact price, detailed quantity/size, full description, ingredients list, nutritional facts, allergens, customer ratings and review counts, availability status. Ensure all data is current and accurate from the product page.",
                         "schema": detail_schema
                     }
                 )
@@ -414,7 +486,7 @@ class ExaStructuredClient:
                 "num_results": 10,
                 "type": "keyword",
                 "summary": {
-                    "query": "Extract store location details including address, city, state, zipcode, phone, and services",
+                    "query": "Extract complete grocery store location information. Focus on: exact store name, full street address, city, state, ZIP code, phone number, operating hours, available services (delivery, pickup, curbside, in-store shopping). Ensure address is complete and properly formatted with city, state, and ZIP code.",
                     "schema": store_schema
                 }
             }
