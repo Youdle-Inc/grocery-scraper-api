@@ -12,7 +12,7 @@ aiohttp==3.9.1
 exa-py==1.0.8
 
 # Caching
-redis==5.0.1
+redis[hiredis]==5.0.1
 
 # Data Models
 pydantic>=2.0.0
