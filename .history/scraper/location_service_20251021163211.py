@@ -114,7 +114,7 @@ class LocationService:
         logger.info(f"Updated coverage for {store_id}: {zipcode_ranges}")
     
     async def get_nearby_stores(self, zipcode: str, radius_miles: int = 10) -> List[StoreLocation]:
-        """Get stores within specified radius using static coverage"""
+        """Get stores within specified radius using Perplexity Sonar"""
         # This will be enhanced with actual distance calculations
         # For now, return stores available in the zipcode
         return await self.get_stores_for_zipcode(zipcode)
@@ -157,7 +157,7 @@ class LocationService:
     
     def get_store_services(self, store_id: str) -> List[str]:
         """Get available services for a store (delivery, pickup, etc.)"""
-        # This will be enhanced with additional store data
+        # This will be enhanced with Perplexity Sonar data
         default_services = ["pickup", "delivery"]
         
         # Store-specific services

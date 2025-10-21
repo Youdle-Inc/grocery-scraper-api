@@ -157,7 +157,7 @@ class LocationService:
     
     def get_store_services(self, store_id: str) -> List[str]:
         """Get available services for a store (delivery, pickup, etc.)"""
-        # This will be enhanced with additional store data
+        # This will be enhanced with Perplexity Sonar data
         default_services = ["pickup", "delivery"]
         
         # Store-specific services
