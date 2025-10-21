@@ -9,7 +9,7 @@ import os
 from typing import List, Dict, Optional, Set
 from .models import StoreLocation, StoreInfo
 from .config import SUPPORTED_STORES, CANONICAL_STORES, STORE_ALIASES
-from .sonar_client import SonarClient
+# SonarClient removed - using Exa only
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +21,7 @@ class LocationService:
         # This will be enhanced with Perplexity Sonar later
         self.store_coverage = self._initialize_store_coverage()
         
-        # Initialize Perplexity Sonar client
-        api_key = os.environ.get("PERPLEXITY_API_KEY")
-        self.sonar_client = SonarClient(api_key)
+        # SonarClient removed - using Exa only
         
     def _initialize_store_coverage(self) -> Dict[str, List[str]]:
         """Initialize store coverage by zipcode ranges"""
@@ -67,17 +65,8 @@ class LocationService:
     async def get_stores_for_zipcode(self, zipcode: str, chains: Optional[Set[str]] = None) -> List[StoreLocation]:
         """Get available stores for a given zipcode using Perplexity Sonar and filter to canonical chains."""
         try:
-            # First try Perplexity Sonar for dynamic store discovery
-            if self.sonar_client.is_available():
-                logger.info(f"🔍 Using Perplexity Sonar to find stores in {zipcode}")
-                sonar_stores = await self.sonar_client.search_stores(zipcode)
-                
-                if sonar_stores:
-                    logger.info(f"✅ Found {len(sonar_stores)} stores via Sonar for {zipcode}")
-                    filtered = self._filter_to_canonical_chains(sonar_stores, chains)
-                    return filtered
-                else:
-                    logger.info(f"⚠️ No stores found via Sonar for {zipcode}, falling back to static coverage")
+            # SonarClient removed - using static coverage only
+            logger.info(f"🔍 Using static store coverage for {zipcode}")
             
             # Fallback to static coverage if Sonar fails or is unavailable
             zipcode_int = int(zipcode)

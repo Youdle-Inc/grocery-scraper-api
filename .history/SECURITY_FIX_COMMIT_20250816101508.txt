@@ -1,8 +1,0 @@
-🔒 SECURITY: Remove hardcoded Perplexity API key
-
-- Remove hardcoded API key from scraper/location_service.py
-- API key should only be loaded from environment variables
-- Ensure .env file is properly ignored by git
-- No sensitive data should be committed to repository
-
-This fixes a critical security vulnerability where the API key was exposed in the source code.

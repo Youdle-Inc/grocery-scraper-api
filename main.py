@@ -218,7 +218,6 @@ def health_check():
         "timestamp": datetime.now().isoformat(),
         "version": "2.0.0",
         "services": {
-            "perplexity_sonar": "removed",
             "exa_api": "available"
         }
     }

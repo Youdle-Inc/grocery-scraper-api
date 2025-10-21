@@ -10,8 +10,7 @@ import logging
 from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
 from exa_py import Exa
-from .prompt_templates import GroceryPrompts
-from .context_prompts import ContextPrompts
+# Prompt templates removed - using inline prompts
 
 load_dotenv()
 exa = Exa(os.getenv("EXA_API_KEY"))
@@ -91,9 +90,53 @@ class ExaStructuredClient:
         
         return "generic"
     
+    def _get_context_prompt(self, context: str) -> str:
+        """Get context-specific prompt"""
+        prompts = {
+            "store_search": "Find grocery stores and supermarkets in the specified location. Focus on major chains and local stores.",
+            "product_search": "Search for specific grocery products and items. Focus on product details, prices, and availability.",
+            "generic": "Search for grocery-related information including stores, products, and services."
+        }
+        return prompts.get(context, prompts["generic"])
+    
+    def _get_category_prompt(self, category: str) -> str:
+        """Get category-specific prompt"""
+        prompts = {
+            "dairy": "Focus on dairy products like milk, cheese, yogurt, and butter.",
+            "produce": "Focus on fresh fruits and vegetables, organic options, and seasonal items.",
+            "meat": "Focus on fresh meat, poultry, seafood, and deli items.",
+            "bakery": "Focus on bread, pastries, cakes, and baked goods.",
+            "organic": "Focus on organic, natural, and health-focused products.",
+            "generic": "Search for general grocery products and items."
+        }
+        return prompts.get(category, prompts["generic"])
+    
+    def _build_enhanced_query(self, query: str, store_name: str, zipcode: str, category: str) -> str:
+        """Build enhanced search query with context"""
+        base_query = query
+        
+        # Add store context if provided
+        if store_name and store_name != "grocery store":
+            base_query = f"{query} at {store_name}"
+        
+        # Add location context if provided
+        if zipcode:
+            base_query = f"{base_query} in {zipcode}"
+        
+        # Add category context
+        if category != "generic":
+            base_query = f"{base_query} {category} products"
+        
+        return base_query
+    
     def _detect_search_context(self, query: str) -> str:
         """Detect search context from user query"""
-        return ContextPrompts.detect_search_context(query)
+        query_lower = query.lower()
+        if any(word in query_lower for word in ['store', 'location', 'near', 'find']):
+            return "store_search"
+        elif any(word in query_lower for word in ['product', 'item', 'buy', 'price']):
+            return "product_search"
+        return "generic"
     
     def _get_optimized_prompt(self, query: str, context: str = None) -> str:
         """Get optimized prompt based on query context and category"""
@@ -102,11 +145,11 @@ class ExaStructuredClient:
             context = self._detect_search_context(query)
         
         # Get context-specific prompt
-        context_prompt = ContextPrompts.get_context_prompt(context)
+        context_prompt = self._get_context_prompt(context)
         
         # Get category-specific prompt
         category = self._detect_product_category(query)
-        category_prompt = GroceryPrompts.get_category_prompt(category)
+        category_prompt = self._get_category_prompt(category)
         
         # Combine context and category prompts
         combined_prompt = f"{context_prompt}\n\nCategory-specific focus: {category_prompt}"
@@ -154,7 +197,7 @@ class ExaStructuredClient:
         try:
             # Build search query with category-specific template
             category = self._detect_product_category(query)
-            search_query = GroceryPrompts.build_enhanced_query(query, store_name or "grocery store", zipcode or "", category)
+            search_query = self._build_enhanced_query(query, store_name or "grocery store", zipcode or "", category)
             
             # Get optimized prompt based on context and category
             optimized_prompt = self._get_optimized_prompt(query, context)
