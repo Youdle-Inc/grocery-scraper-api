@@ -222,14 +222,12 @@ async def api_info():
 @app.get("/health", response_model=HealthResponse, tags=["meta"], response_model_exclude_none=True, response_class=PrettyJSONResponse)
 def health_check():
     """Health check endpoint"""
-    # Since we know the client is working (tested directly), 
-    # and the issue seems to be with the health endpoint logic,
-    # let's just return available for now
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "version": "2.0.0",
         "services": {
+            "perplexity_sonar": "unavailable",  # Removed in cleanup
             "exa_api": "available"
         }
     }
