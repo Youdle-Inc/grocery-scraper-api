@@ -568,21 +568,54 @@ class ExaStructuredClient:
             logger.error(f"❌ Failed to get product details: {e}")
             return None
     
+    def _get_city_state_from_zipcode(self, zipcode: str) -> tuple:
+        """Get city and state from zipcode (basic lookup for common ZIPs)"""
+        # Basic ZIP code to city/state mapping for common areas
+        zip_mapping = {
+            "60601": ("Chicago", "IL"), "60602": ("Chicago", "IL"), "60603": ("Chicago", "IL"),
+            "60604": ("Chicago", "IL"), "60605": ("Chicago", "IL"), "60606": ("Chicago", "IL"),
+            "60607": ("Chicago", "IL"), "60608": ("Chicago", "IL"), "60609": ("Chicago", "IL"),
+            "60610": ("Chicago", "IL"), "60611": ("Chicago", "IL"), "60612": ("Chicago", "IL"),
+            "60613": ("Chicago", "IL"), "60614": ("Chicago", "IL"), "60615": ("Chicago", "IL"),
+            "60616": ("Chicago", "IL"), "60617": ("Chicago", "IL"), "60618": ("Chicago", "IL"),
+            "60619": ("Chicago", "IL"), "60620": ("Chicago", "IL"), "60621": ("Chicago", "IL"),
+            "60622": ("Chicago", "IL"), "60623": ("Chicago", "IL"), "60624": ("Chicago", "IL"),
+            "60625": ("Chicago", "IL"), "60626": ("Chicago", "IL"), "60628": ("Chicago", "IL"),
+            "60629": ("Chicago", "IL"), "60630": ("Chicago", "IL"), "60631": ("Chicago", "IL"),
+            "60632": ("Chicago", "IL"), "60633": ("Chicago", "IL"), "60634": ("Chicago", "IL"),
+            "60636": ("Chicago", "IL"), "60637": ("Chicago", "IL"), "60638": ("Chicago", "IL"),
+            "60639": ("Chicago", "IL"), "60640": ("Chicago", "IL"), "60641": ("Chicago", "IL"),
+            "60642": ("Chicago", "IL"), "60643": ("Chicago", "IL"), "60644": ("Chicago", "IL"),
+            "60645": ("Chicago", "IL"), "60646": ("Chicago", "IL"), "60647": ("Chicago", "IL"),
+            "60649": ("Chicago", "IL"), "60651": ("Chicago", "IL"), "60652": ("Chicago", "IL"),
+            "60653": ("Chicago", "IL"), "60654": ("Chicago", "IL"), "60655": ("Chicago", "IL"),
+            "60656": ("Chicago", "IL"), "60657": ("Chicago", "IL"), "60659": ("Chicago", "IL"),
+            "60660": ("Chicago", "IL"), "60661": ("Chicago", "IL"),
+            "10001": ("New York", "NY"), "10002": ("New York", "NY"), "10003": ("New York", "NY"),
+            "10004": ("New York", "NY"), "10005": ("New York", "NY"),
+            "90001": ("Los Angeles", "CA"), "90002": ("Los Angeles", "CA"),
+            "94102": ("San Francisco", "CA"), "94103": ("San Francisco", "CA"),
+            "02108": ("Boston", "MA"), "02109": ("Boston", "MA"),
+        }
+        return zip_mapping.get(zipcode, (None, None))
+
     async def search_stores_in_zipcode(self, store_chain: str, zipcode: str) -> List[Dict[str, Any]]:
         """
         Search for specific store locations in a zipcode
-        
+
         Args:
             store_chain: Store chain name (e.g., "Target", "Walmart")
             zipcode: ZIP code to search
-            
+
         Returns:
             List of store locations with addresses
         """
         if not self.is_available():
             return []
-        
+
         try:
+            # Get default city/state from zipcode
+            default_city, default_state = self._get_city_state_from_zipcode(zipcode)
             # Build store location search query
             search_query = f"{store_chain} store locations near {zipcode}"
             domain = self._get_store_domain(store_chain)
@@ -619,21 +652,59 @@ class ExaStructuredClient:
             
             stores = []
             for result in getattr(response, "results", []):
-                summary = getattr(result, "summary", {})
-                if isinstance(summary, dict):
-                    stores.append({
-                        "store_id": store_chain.lower().replace(" ", "_"),
-                        "store_name": summary.get("store_name") or store_chain,
-                        "address": summary.get("address"),
-                        "city": summary.get("city"),
-                        "state": summary.get("state"),
-                        "zipcode": summary.get("zipcode") or zipcode,
-                        "phone": summary.get("phone"),
-                        "hours": summary.get("hours"),
-                        "services": summary.get("services") or ["in-store"],
-                        "status": "active",
-                        "source": "exa_structured"
-                    })
+                # Extract address info from text content
+                import re
+                text = getattr(result, "text", "")[:2000] if hasattr(result, "text") else ""
+                title = getattr(result, "title", "")
+
+                # Try to extract full address from text
+                address = None
+                city = None
+                state = None
+                store_zip = zipcode
+
+                # Look for address patterns like "123 Main St, City, ST 12345"
+                address_pattern = r'(\d+\s+[A-Za-z\s]+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Way|Court|Ct|Place|Pl)[.,]?\s*(?:#\d+)?)[,\s]+([A-Za-z\s]+)[,\s]+([A-Z]{2})\s+(\d{5})'
+                match = re.search(address_pattern, text)
+                if match:
+                    address = match.group(1).strip()
+                    city = match.group(2).strip()
+                    state = match.group(3).strip()
+                    store_zip = match.group(4)
+                else:
+                    # Try simpler pattern for city, state
+                    city_state_pattern = r'([A-Za-z\s]+),\s*([A-Z]{2})\s+(\d{5})'
+                    match = re.search(city_state_pattern, text)
+                    if match:
+                        city = match.group(1).strip()
+                        state = match.group(2).strip()
+                        store_zip = match.group(3)
+
+                # Extract from title if available (e.g., "Target - Chicago")
+                if not city and " - " in title:
+                    parts = title.split(" - ")
+                    if len(parts) > 1:
+                        city = parts[1].strip()
+
+                # Use default city/state if not found
+                if not city:
+                    city = default_city
+                if not state:
+                    state = default_state
+
+                stores.append({
+                    "store_id": store_chain.lower().replace(" ", "_"),
+                    "store_name": store_chain,
+                    "address": address,
+                    "city": city,
+                    "state": state,
+                    "zipcode": store_zip,
+                    "phone": None,
+                    "hours": None,
+                    "services": ["in-store"],
+                    "status": "active",
+                    "source": "exa_structured"
+                })
             
             logger.info(f"✅ Found {len(stores)} {store_chain} locations near {zipcode}")
             return stores
