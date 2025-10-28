@@ -4,7 +4,7 @@ Grocery Scraper API
 A professional FastAPI service for scraping grocery store product data
 """
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from typing import List, Optional, Dict, Any
@@ -76,18 +76,45 @@ def extract_state_from_address(address: str) -> Optional[str]:
 # Create FastAPI app
 app = FastAPI(
     title="Grocery Scraper API",
-    description="Professional API for scraping real grocery store product data",
-    version="1.0.0",
+    description="""
+    ## 🛒 AI-Powered Grocery Product Discovery API
+
+    Search for grocery products across major retailers with real product URLs and images.
+
+    ### ✨ Features
+    - **Real Product URLs**: Direct links to Target, Walmart, and other major stores
+    - **High-Quality Images**: 800x800 product images from store CDNs
+    - **Smart Search**: AI-powered semantic search with Exa API
+    - **Multi-Store Comparison**: Compare products across different retailers
+    - **Location-Based**: Search by ZIP code for local availability
+
+    ### 🏬 Supported Stores
+    Target • Walmart • Whole Foods • Kroger • Safeway • ALDI • Costco • Trader Joe's
+
+    ### 🚀 Quick Start
+    1. Try the `/health` endpoint to verify the API is running
+    2. Use `/stores/{zipcode}` to find stores in your area
+    3. Search products with `/products/search?query=milk&store_name=Target&zipcode=60601`
+    4. Compare prices with `/products/aggregate?query=eggs&zipcode=60601`
+
+    ### 📊 Response Format
+    All responses include `product_url` and `image_url` for easy web app integration.
+    """,
+    version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
     contact={
         "name": "Grocery Scraper API",
-        "url": "https://github.com/yourusername/grocery-scraper-api",
+        "url": "https://github.com/Youdle-Inc/grocery-scraper-api",
     },
     license_info={
         "name": "MIT",
         "url": "https://opensource.org/licenses/MIT",
     },
+    servers=[
+        {"url": "http://localhost:8000", "description": "Local development server"},
+        {"url": "http://localhost:8001", "description": "Alternative local server"},
+    ]
 )
 
 # Custom JSON response class for pretty formatting
@@ -219,9 +246,33 @@ async def api_info():
         ]
     }
 
-@app.get("/health", response_model=HealthResponse, tags=["meta"], response_model_exclude_none=True, response_class=PrettyJSONResponse)
+@app.get(
+    "/health",
+    response_model=HealthResponse,
+    tags=["🏥 Health"],
+    response_model_exclude_none=True,
+    response_class=PrettyJSONResponse,
+    summary="Health Check",
+    description="""
+    Check if the API and all services are running properly.
+
+    Returns the current status, version, and availability of external services (Exa API).
+
+    **Example Response:**
+    ```json
+    {
+      "status": "healthy",
+      "timestamp": "2025-10-28T11:45:16.737109",
+      "version": "2.0.0",
+      "services": {
+        "exa_api": "available"
+      }
+    }
+    ```
+    """,
+)
 def health_check():
-    """Health check endpoint"""
+    """Health check endpoint - verify API is running"""
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
@@ -235,9 +286,60 @@ def health_check():
 
 
 
-@app.get("/stores/{zipcode}", tags=["stores"], response_model=StoresResponse, response_model_exclude_none=True, response_class=PrettyJSONResponse)
-async def get_stores_in_zipcode(zipcode: str, store_chain: Optional[str] = None):
-    """Get grocery store locations in a zipcode using Exa"""
+@app.get(
+    "/stores/{zipcode}",
+    tags=["🏪 Stores"],
+    response_model=StoresResponse,
+    response_model_exclude_none=True,
+    response_class=PrettyJSONResponse,
+    summary="Find Stores by ZIP Code",
+    description="""
+    Find grocery stores in a specific ZIP code.
+
+    Returns a list of stores with their locations, services, and contact information.
+
+    **Parameters:**
+    - `zipcode` (path): 5-digit ZIP code (e.g., 60601)
+    - `store_chain` (query, optional): Filter by specific store chain (e.g., "Target", "Walmart")
+
+    **Example Request:**
+    ```
+    GET /stores/60601
+    GET /stores/60601?store_chain=Target
+    ```
+
+    **Example Response:**
+    ```json
+    {
+      "zipcode": "60601",
+      "stores_found": 44,
+      "stores": [
+        {
+          "store_id": "target",
+          "store_name": "Target",
+          "address": "123 Main St, Chicago, IL 60601",
+          "services": ["in-store", "pickup", "delivery"],
+          "status": "active",
+          "zipcode": "60601",
+          "location": {
+            "zipcode": "60601",
+            "city": "Chicago",
+            "state": "IL"
+          }
+        }
+      ]
+    }
+    ```
+
+    **Supported Store Chains:**
+    Target, Walmart, Whole Foods, Kroger, Safeway, ALDI, Costco, Trader Joe's, Sam's Club
+    """,
+)
+async def get_stores_in_zipcode(
+    zipcode: str = Path(..., description="5-digit ZIP code", example="60601"),
+    store_chain: Optional[str] = Query(None, description="Filter by store chain", example="Target")
+):
+    """Find grocery stores in a ZIP code"""
     try:
         # Validate zipcode format
         import re
@@ -315,19 +417,73 @@ async def get_stores_in_zipcode(zipcode: str, store_chain: Optional[str] = None)
 
 
 
-@app.get("/products/search", response_model=ProductsSearchResponse, tags=["products"], response_model_exclude_none=True, response_class=PrettyJSONResponse)
+@app.get(
+    "/products/search",
+    response_model=ProductsSearchResponse,
+    tags=["🛒 Products"],
+    response_model_exclude_none=True,
+    response_class=PrettyJSONResponse,
+    summary="Search for Products",
+    description="""
+    Search for grocery products with AI-powered semantic search.
+
+    Returns products with **real URLs** and **high-quality images** ready for web app integration.
+
+    **Parameters:**
+    - `query` (required): Product search term (e.g., "milk", "organic eggs", "whole wheat bread")
+    - `store_name` (optional): Filter by store (e.g., "Target", "Walmart")
+    - `zipcode` (optional): 5-digit ZIP code for location-based results
+    - `num_results`: Number of results to return (default: 20, max: 50)
+    - `refresh`: Bypass cache and get fresh results (default: false)
+
+    **Example Requests:**
+    ```
+    GET /products/search?query=milk&zipcode=60601
+    GET /products/search?query=organic+eggs&store_name=Target&zipcode=60601
+    GET /products/search?query=bread&num_results=10
+    ```
+
+    **Example Response:**
+    ```json
+    {
+      "query": "milk",
+      "store_name": "Target",
+      "location": "60601",
+      "products_found": 5,
+      "products": [
+        {
+          "name": "Milk - Good & Gather™",
+          "brand": "Target",
+          "price": null,
+          "currency": "USD",
+          "quantity": "0.5 Gallon",
+          "image_url": "https://target.scene7.com/is/image/Target/94602358?wid=800&hei=800&qlt=80&fmt=webp",
+          "product_url": "https://www.target.com/p/milk-good-gather/-/A-94602358",
+          "store_name": "Target",
+          "store_zipcode": "60601",
+          "availability": "Check Store"
+        }
+      ]
+    }
+    ```
+
+    **✅ What You Get:**
+    - Real product page URLs (clickable links)
+    - High-quality 800x800 images
+    - Product names, brands, and quantities
+    - Prices when available in page text (~20% coverage)
+    - Store information and location
+    """,
+)
 async def search_products(
-    query: str,
-    store_name: Optional[str] = None,
-    zipcode: Optional[str] = None,
-    num_results: int = 20,
-    context: Optional[str] = None,
-    refresh: bool = False
+    query: str = Query(..., description="Product search query", example="milk"),
+    store_name: Optional[str] = Query(None, description="Filter by store name", example="Target"),
+    zipcode: Optional[str] = Query(None, description="5-digit ZIP code", example="60601"),
+    num_results: int = Query(20, ge=1, le=50, description="Number of results"),
+    context: Optional[str] = Query(None, description="Search context (internal use)"),
+    refresh: bool = Query(False, description="Bypass cache")
 ):
-    """
-    Search for grocery products using Exa with structured data extraction.
-    Returns product information including price, quantity, images, and store location.
-    """
+    """Search for grocery products with AI-powered search"""
     try:
         # Validate zipcode if provided
         if zipcode:
@@ -391,21 +547,90 @@ async def search_products(
         }
 
 
-@app.get("/products/aggregate", response_model=AggregateResponse, tags=["aggregate"], response_model_exclude_none=True, response_class=PrettyJSONResponse)
+@app.get(
+    "/products/aggregate",
+    response_model=AggregateResponse,
+    tags=["📊 Aggregate"],
+    response_model_exclude_none=True,
+    response_class=PrettyJSONResponse,
+    summary="Compare Products Across Stores",
+    description="""
+    Compare the same products across multiple stores to find the best deals.
+
+    Groups identical products together and shows offers from different retailers.
+
+    **Parameters:**
+    - `query` (required): Product to search for (e.g., "eggs", "milk", "bread")
+    - `zipcode` (required): 5-digit ZIP code
+    - `radius_miles`: Search radius in miles (default: 10)
+    - `stores`: Comma-separated store IDs to search (e.g., "target,walmart")
+    - `refresh`: Bypass cache (default: false)
+
+    **Example Requests:**
+    ```
+    GET /products/aggregate?query=eggs&zipcode=60601
+    GET /products/aggregate?query=milk&zipcode=60601&stores=target,walmart
+    GET /products/aggregate?query=bread&zipcode=10001&radius_miles=15
+    ```
+
+    **Example Response:**
+    ```json
+    {
+      "query": "eggs",
+      "zipcode": "60601",
+      "stores_considered": ["target", "walmart"],
+      "results": [
+        {
+          "canonical_product": {
+            "name": "Grade A Large Eggs - 12ct",
+            "brand": "Target",
+            "quantity": "12ct",
+            "images": [
+              "https://target.scene7.com/is/image/Target/14713534?wid=800&hei=800&qlt=80&fmt=webp"
+            ]
+          },
+          "offers": [
+            {
+              "store_id": "target",
+              "store_name": "Target",
+              "price": 4.99,
+              "currency": "USD",
+              "product_url": "https://www.target.com/p/...",
+              "image_url": "https://target.scene7.com/...",
+              "zipcode": "60601"
+            },
+            {
+              "store_id": "walmart",
+              "store_name": "Walmart",
+              "price": 4.49,
+              "currency": "USD",
+              "product_url": "https://www.walmart.com/ip/...",
+              "zipcode": "60601"
+            }
+          ]
+        }
+      ]
+    }
+    ```
+
+    **💡 Use Cases:**
+    - Price comparison across stores
+    - Finding the best deals
+    - Checking product availability at multiple retailers
+    - Building shopping lists with optimal store selection
+
+    **Available Stores:**
+    target, walmart, whole_foods, kroger, aldi, costco, trader_joes, sams_club, safeway
+    """,
+)
 async def aggregate_products(
-    query: str,
-    zipcode: str,
-    radius_miles: int = 10,
-    stores: Optional[str] = None,
-    refresh: bool = False
+    query: str = Query(..., description="Product to search for", example="eggs"),
+    zipcode: str = Query(..., description="5-digit ZIP code", example="60601"),
+    radius_miles: int = Query(10, ge=1, le=50, description="Search radius in miles"),
+    stores: Optional[str] = Query(None, description="Comma-separated store IDs", example="target,walmart"),
+    refresh: bool = Query(False, description="Bypass cache")
 ):
-    """
-    Product-first search across multiple stores in a zipcode using Exa.
-    Returns aggregated product offers with structured data including:
-    - Product name, brand, quantity, images
-    - Price, availability
-    - Store name, address, zipcode
-    """
+    """Compare products across multiple stores"""
     try:
         # Validate zipcode
         import re
