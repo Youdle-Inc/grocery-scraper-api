@@ -101,8 +101,8 @@ app = FastAPI(
     All responses include `product_url` and `image_url` for easy web app integration.
     """,
     version="2.0.0",
-    docs_url="/swagger",  # Swagger UI moved to /swagger
-    redoc_url="/docs",    # ReDoc is now at /docs (main)
+    docs_url="/swagger",  # Swagger UI at /swagger for interactive testing
+    redoc_url=None,       # We'll mount ReDoc at root manually
     contact={
         "name": "Grocery Scraper API",
         "url": "https://github.com/Youdle-Inc/grocery-scraper-api",
@@ -160,58 +160,16 @@ async def startup_event():
     logger.info(f"🔑 EXA_API_KEY loaded: {bool(os.getenv('EXA_API_KEY'))}")
     logger.info(f"🌍 Environment: {os.getenv('ENVIRONMENT', 'development')}")
 
-@app.get("/", response_class=HTMLResponse, tags=["meta"])
+from fastapi.openapi.docs import get_redoc_html
+
+@app.get("/", response_class=HTMLResponse, tags=["meta"], include_in_schema=False)
 async def root():
-    """Root endpoint serving simple API documentation"""
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Grocery Scraper API</title>
-        <style>
-            body { font-family: Arial, sans-serif; margin: 40px; background: #1a1a1a; color: #e0e0e0; }
-            .container { max-width: 800px; margin: 0 auto; }
-            h1 { color: #4CAF50; }
-            .endpoint { background: #2a2a2a; padding: 20px; margin: 20px 0; border-radius: 8px; }
-            .method { background: #4CAF50; color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
-            .url { font-family: monospace; color: #81C784; }
-            code { background: #333; padding: 2px 6px; border-radius: 4px; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🛒 Grocery Scraper API v2.0.0</h1>
-            <p>AI-powered grocery product discovery with Exa - structured data with real URLs and images</p>
-            
-            <div class="endpoint">
-                <h3><span class="method">GET</span> <span class="url">/health</span></h3>
-                <p>Check API health and service status</p>
-                <code>curl "https://grocery-scraper-api.vercel.app/health"</code>
-            </div>
-            
-            <div class="endpoint">
-                <h3><span class="method">GET</span> <span class="url">/stores/{zipcode}</span></h3>
-                <p>Find grocery stores in a specific ZIP code</p>
-                <code>curl "https://grocery-scraper-api.vercel.app/stores/10001"</code>
-            </div>
-            
-            <div class="endpoint">
-                <h3><span class="method">GET</span> <span class="url">/products/search</span></h3>
-                <p>Search for specific products with structured data</p>
-                <code>curl "https://grocery-scraper-api.vercel.app/products/search?query=organic%20milk&zipcode=10001"</code>
-            </div>
-            
-            <div class="endpoint">
-                <h3><span class="method">GET</span> <span class="url">/products/aggregate</span></h3>
-                <p>Compare products across multiple stores</p>
-                <code>curl "https://grocery-scraper-api.vercel.app/products/aggregate?query=pizza&zipcode=60622&stores=walmart,target"</code>
-            </div>
-            
-            <p><strong>Features:</strong> Exa-powered structured product search, real product URLs, high-quality images, store location discovery, smart product matching</p>
-        </div>
-    </body>
-    </html>
-    """
+    """Root endpoint - serves ReDoc documentation"""
+    return get_redoc_html(
+        openapi_url=app.openapi_url,
+        title=app.title + " - Documentation",
+        redoc_js_url="https://cdn.jsdelivr.net/npm/redoc@next/bundles/redoc.standalone.js",
+    )
 
 @app.get("/api", tags=["meta"])
 async def api_info():
