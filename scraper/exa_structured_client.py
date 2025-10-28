@@ -113,20 +113,20 @@ class ExaStructuredClient:
     
     def _build_enhanced_query(self, query: str, store_name: str, zipcode: str, category: str) -> str:
         """Build enhanced search query with context"""
-        base_query = query
-        
-        # Add store context if provided
+        # For better product results, make query more specific
+        # Add common product variations to get individual product pages
         if store_name and store_name != "grocery store":
-            base_query = f"{query} at {store_name}"
-        
-        # Add location context if provided
-        if zipcode:
-            base_query = f"{base_query} in {zipcode}"
-        
-        # Add category context
-        if category != "generic":
-            base_query = f"{base_query} {category} products"
-        
+            if len(query.split()) == 1:  # Single word like "milk"
+                # Expand to find specific products
+                base_query = f"{query} gallon {store_name} product"
+            else:
+                base_query = f"{query} {store_name}"
+        else:
+            if len(query.split()) == 1:
+                base_query = f"{query} gallon grocery product"
+            else:
+                base_query = f"{query} grocery"
+
         return base_query
     
     def _detect_search_context(self, query: str) -> str:
@@ -276,19 +276,21 @@ class ExaStructuredClient:
             
             logger.info(f"🔍 Searching Exa for: {search_query} (Category: {category}, Context: {context or 'auto-detected'})")
             
-            # Search with minimal options
+            # Search with text content extraction
+            # Request more results since we filter out category pages
             search_options = {
                 "query": search_query,
-                "num_results": num_results,
-                "type": "keyword"
+                "num_results": min(num_results * 3, 50),  # Request 3x to account for filtering
+                "type": "neural",  # Neural search for semantic matching
+                "text": {"max_characters": 2000}  # Get more text content
             }
-            
+
             # Add domain filter if store specified
             if store_name:
                 domain = self._get_store_domain(store_name)
                 if domain:
                     search_options["include_domains"] = [domain]
-            
+
             # Execute search
             response = await asyncio.get_event_loop().run_in_executor(
                 None,
@@ -297,7 +299,10 @@ class ExaStructuredClient:
             
             # Process results
             products = self._process_search_results(response, store_name, zipcode)
-            
+
+            # Limit to requested number
+            products = products[:num_results]
+
             logger.info(f"✅ Found {len(products)} products via Exa")
             return products
             
@@ -328,6 +333,37 @@ class ExaStructuredClient:
         
         return " ".join(parts)
     
+    def _is_product_page(self, url: str, title: str) -> bool:
+        """Check if URL is an actual product page, not a category/search page"""
+        if not url:
+            return False
+
+        # Filter out search and category pages
+        exclude_patterns = [
+            '/s/',  # Target search pages
+            '/c/',  # Target category pages
+            '/browse/',  # Walmart browse pages
+            '?Nao=',  # Pagination
+            'Page ',  # Page indicators in title
+        ]
+
+        for pattern in exclude_patterns:
+            if pattern in url or pattern in title:
+                return False
+
+        # Check for product page indicators
+        product_indicators = [
+            '/p/',  # Target product pages
+            '/ip/',  # Walmart individual product pages
+            '/A-',  # Target product ID
+        ]
+
+        for indicator in product_indicators:
+            if indicator in url:
+                return True
+
+        return False
+
     def _process_search_results(
         self,
         response: Any,
@@ -336,22 +372,30 @@ class ExaStructuredClient:
     ) -> List[Dict[str, Any]]:
         """Process Exa search results into structured product data"""
         products = []
-        
+
         try:
             results = getattr(response, "results", [])
-            
+
             for result in results:
                 try:
+                    # Check if this is an actual product page
+                    url = getattr(result, "url", "")
+                    title = getattr(result, "title", "")
+
+                    if not self._is_product_page(url, title):
+                        logger.debug(f"Skipping non-product page: {title}")
+                        continue
+
                     product = self._extract_product_data(result, store_name, zipcode)
                     if product:
                         products.append(product)
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to process result: {e}")
                     continue
-            
+
         except Exception as e:
             logger.error(f"❌ Failed to process search results: {e}")
-        
+
         return products
     
     def _extract_product_data(
@@ -362,76 +406,110 @@ class ExaStructuredClient:
     ) -> Optional[Dict[str, Any]]:
         """Extract structured product data from a single result"""
         try:
-            # Get structured summary data
-            summary = getattr(result, "summary", {})
-            if isinstance(summary, str):
-                # If summary is a string, try to parse as dict
-                import json
+            import re
+
+            # Get title and URL
+            title = getattr(result, "title", "Unknown Product")
+            url = getattr(result, "url", None)
+            text = getattr(result, "text", "")[:2000] if hasattr(result, "text") else ""
+
+            # Extract price from text content using regex
+            price = None
+            # Look for price with dollar sign first
+            price_with_dollar = re.search(r'\$(\d+\.\d{2})', text)
+            if price_with_dollar:
                 try:
-                    summary = json.loads(summary)
+                    price = float(price_with_dollar.group(1))
                 except:
-                    summary = {}
-            
-            # Extract basic data
-            product_name = summary.get("product_name") or getattr(result, "title", "Unknown Product")
-            price = summary.get("price")
-            
-            # Parse price if it's a string
-            if isinstance(price, str):
-                import re
-                price_match = re.search(r'[\d.]+', price.replace(',', ''))
-                price = float(price_match.group()) if price_match else None
-            
+                    pass
+
+            # If no price found, look for decimal numbers in reasonable range
+            if not price:
+                all_decimals = re.findall(r'\b(\d+\.\d{2})\b', text)
+                for decimal in all_decimals:
+                    try:
+                        potential_price = float(decimal)
+                        if 0.50 <= potential_price <= 500:
+                            price = potential_price
+                            break
+                    except:
+                        continue
+
+            # Extract brand from title or text
+            brand = None
+            common_brands = ["Horizon", "Organic Valley", "Oatly", "Silk", "Chobani", "Target", "365", "Kirkland", "Great Value"]
+            for brand_name in common_brands:
+                if brand_name.lower() in title.lower() or brand_name.lower() in text.lower():
+                    brand = brand_name
+                    break
+
+            # Extract quantity/size
+            quantity = None
+            size_patterns = [
+                r'(\d+\.?\d*\s*(?:oz|fl oz|gallon|quart|liter|lb|count|ct|pack))',
+                r'(\d+\.?\d*\s*(?:ounce|fluid ounce))',
+            ]
+            for pattern in size_patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    quantity = match.group(1)
+                    break
+
             # Extract image URLs
             image_url = None
-            additional_images = []
-            
-            # Try to get image from result
-            if getattr(result, "image", None):
+            if hasattr(result, "image") and result.image:
                 image_url = result.image
-            
-            # Try to get images from extras
-            if hasattr(result, "extras") and result.extras:
-                image_links = result.extras.get("imageLinks", [])
-                if image_links and not image_url:
-                    image_url = image_links[0]
-                if len(image_links) > 1:
-                    additional_images = image_links[1:4]
-            
+
+            # Detect store from URL and generate image if possible
+            detected_store = store_name
+            if url:
+                if "target.com" in url:
+                    detected_store = "Target"
+                    # Generate Target product image from URL
+                    # Target URLs format: /p/product-name/-/A-12345678
+                    if not image_url:
+                        match = re.search(r'/A-(\d+)', url)
+                        if match:
+                            product_id = match.group(1)
+                            # Target Scene7 image CDN format
+                            image_url = f"https://target.scene7.com/is/image/Target/{product_id}?wid=800&hei=800&qlt=80&fmt=webp"
+                elif "walmart.com" in url:
+                    detected_store = "Walmart"
+                    # Try to extract Walmart product ID and construct image
+                    if not image_url:
+                        match = re.search(r'/ip/[^/]+/(\d+)', url)
+                        if match:
+                            product_id = match.group(1)
+                            # Walmart image CDN format (may not always work)
+                            image_url = f"https://i5.walmartimages.com/asr/{product_id}"
+                elif "wholefoodsmarket.com" in url:
+                    detected_store = "Whole Foods"
+                elif "kroger.com" in url:
+                    detected_store = "Kroger"
+                elif "aldi.us" in url:
+                    detected_store = "ALDI"
+
             # Build product object
             product = {
-                "name": product_name,
-                "brand": summary.get("brand"),
+                "name": title,
+                "brand": brand,
                 "price": price,
-                "currency": summary.get("currency") or "USD",
-                "quantity": summary.get("quantity"),
-                "availability": summary.get("availability") or "In Stock",
+                "currency": "USD",
+                "quantity": quantity,
+                "availability": "Check Store",
                 "image_url": image_url,
-                "product_url": getattr(result, "url", None),
-                "description": summary.get("description") or getattr(result, "text", "")[:500],
-                "category": summary.get("category"),
-                "rating": summary.get("rating"),
-                "reviews_count": summary.get("reviews_count"),
+                "product_url": url,
+                "description": text[:200] if text else None,
+                "category": None,
+                "rating": None,
+                "reviews_count": None,
+                "store_name": detected_store,
+                "store_zipcode": zipcode,
                 "source": "exa_structured"
             }
-            
-            # Add store information
-            extracted_store_name = summary.get("store_name") or store_name
-            if extracted_store_name:
-                product["store_name"] = extracted_store_name
-            
-            # Add location information
-            product["store_address"] = summary.get("store_address")
-            product["store_city"] = summary.get("store_city")
-            product["store_state"] = summary.get("store_state")
-            product["store_zipcode"] = summary.get("store_zipcode") or zipcode
-            
-            # Add additional images if available
-            if additional_images:
-                product["additional_images"] = additional_images
-            
+
             return product
-            
+
         except Exception as e:
             logger.error(f"❌ Failed to extract product data: {e}")
             return None
@@ -528,12 +606,9 @@ class ExaStructuredClient:
                 "query": search_query,
                 "num_results": 10,
                 "type": "keyword",
-                "summary": {
-                    "query": "Extract complete grocery store location information. Focus on: exact store name, full street address, city, state, ZIP code, phone number, operating hours, available services (delivery, pickup, curbside, in-store shopping). Ensure address is complete and properly formatted with city, state, and ZIP code.",
-                    "schema": store_schema
-                }
+                "text": True
             }
-            
+
             if domain:
                 search_options["include_domains"] = [domain]
             
