@@ -112,8 +112,9 @@ app = FastAPI(
         "url": "https://opensource.org/licenses/MIT",
     },
     servers=[
-        {"url": "http://localhost:8000", "description": "Local development server"},
-        {"url": "http://localhost:8001", "description": "Alternative local server"},
+        {"url": "https://grocery-scraper-api.vercel.app", "description": "Production server"},
+        {"url": "http://localhost:8001", "description": "Local development server"},
+        {"url": "http://localhost:8000", "description": "Alternative local server"},
     ]
 )
 
