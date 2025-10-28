@@ -101,8 +101,8 @@ app = FastAPI(
     All responses include `product_url` and `image_url` for easy web app integration.
     """,
     version="2.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url="/swagger",  # Swagger UI moved to /swagger
+    redoc_url="/docs",    # ReDoc is now at /docs (main)
     contact={
         "name": "Grocery Scraper API",
         "url": "https://github.com/Youdle-Inc/grocery-scraper-api",
