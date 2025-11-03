@@ -39,6 +39,7 @@ from scraper.models import (
     AggregateResponse,
 )
 from scraper.image_scraper import ImageScraper
+from scraper.ai_scraper import AIScraper
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -147,6 +148,7 @@ app.add_middleware(
 # Initialize services
 exa_client = ExaStructuredClient()
 location_service = LocationService()
+ai_scraper = AIScraper()  # AI-powered scraper for direct price extraction
 cache = Cache()
 
 # Debug: Check client status
@@ -590,9 +592,9 @@ async def aggregate_products(
     refresh: bool = Query(False, description="Bypass cache")
 ):
     """Compare products across multiple stores"""
+    import re  # Import at function level for use in derive_image_from_product_url
     try:
         # Validate zipcode
-        import re
         if not re.match(r"^\d{5}$", zipcode):
             raise HTTPException(status_code=400, detail="Invalid zipcode format")
 
@@ -746,18 +748,35 @@ async def aggregate_products(
 
         # Enrich images for better consistency
         async def derive_image_from_product_url(product_url: Optional[str]) -> Optional[str]:
+            """Derive image URL from product URL - fastest and most accurate method"""
             if not product_url:
                 return None
             try:
                 url = product_url.lower()
-                # Target: build Scene7 image from product id in "/A-<id>"
+                
+                # Target: Most reliable - Scene7 CDN format
                 if "target.com" in url and "/a-" in url:
                     try:
                         pid = product_url.split("/A-")[1].split("/")[0]
                         return f"https://target.scene7.com/is/image/Target/{pid}?wid=1200&hei=1200&qlt=80&fmt=webp"
                     except Exception:
-                        return None
-                # Walmart: best effort is to rely on provided image; constructing reliably from URL is brittle
+                        pass
+                
+                # Walmart: Extract product ID from URL
+                if "walmart.com" in url and "/ip/" in url:
+                    try:
+                        # Walmart format: /ip/Product-Name/12345678
+                        match = re.search(r'/ip/[^/]+/(\d+)', url)
+                        if match:
+                            product_id = match.group(1)
+                            # Try multiple Walmart CDN patterns
+                            return f"https://i5.walmartimages.com/asr/{product_id}.jpeg?odnHeight=612&odnWidth=612&odnBg=FFFFFF"
+                    except Exception:
+                        pass
+                
+                # Whole Foods / Amazon Fresh: Use product URL directly with image parameter
+                # (These typically have images embedded in the page, less reliable)
+                
                 return None
             except Exception:
                 return None
@@ -769,24 +788,25 @@ async def aggregate_products(
             async def enrich_group(group: Dict[str, Any]) -> None:
                 async with semaphore_enrich:
                     canonical = group["canonical_product"]
-                    images: List[str] = canonical.get("images") or []
-                    image_set = set(images)
+                    image_set = set()
 
-                    # 1) Add any offer images we already have
+                    # PRIORITY 1: Always derive from product URLs first (fastest, most accurate)
+                    for offer in group["offers"]:
+                        product_url = offer.get("product_url")
+                        if product_url:
+                            derived = await derive_image_from_product_url(product_url)
+                            if derived:
+                                image_set.add(derived)
+                                # Set this as the offer's image_url immediately
+                                offer["image_url"] = derived
+
+                    # PRIORITY 2: Use any images already provided by Exa
                     for offer in group["offers"]:
                         offer_img = offer.get("image_url")
                         if offer_img:
                             image_set.add(offer_img)
 
-                    # 2) Try to derive from product URLs for known stores (e.g., Target)
-                    if not image_set:
-                        for offer in group["offers"]:
-                            derived = await derive_image_from_product_url(offer.get("product_url"))
-                            if derived:
-                                image_set.add(derived)
-                                break
-
-                    # 3) If still empty, query EXA for likely product images by name/brand
+                    # PRIORITY 3: Only if still empty, fallback to Exa search (slowest)
                     if not image_set and exa_client.is_available():
                         try:
                             exa_query = " ".join([
@@ -809,7 +829,7 @@ async def aggregate_products(
                         except Exception:
                             pass
 
-                    # 4) Fallback to lightweight scraper (best-effort)
+                    # PRIORITY 4: Last resort - lightweight scraper
                     if not image_set:
                         img = await scraper.find_product_image(
                             canonical.get("name") or "",
@@ -820,9 +840,9 @@ async def aggregate_products(
                             image_set.add(img)
 
                     # Update canonical images
-                    canonical["images"] = list(image_set)
+                    canonical["images"] = list(image_set) if image_set else []
 
-                    # 5) Backfill missing offer image_url from canonical
+                    # Backfill any remaining missing offer image_urls
                     if canonical["images"]:
                         primary = canonical["images"][0]
                         for offer in group["offers"]:
@@ -831,6 +851,80 @@ async def aggregate_products(
 
             # Enrich all groups concurrently
             await asyncio.gather(*(enrich_group(g) for g in grouped.values()))
+
+        # Optional: Enhance descriptions with AI if they're missing or too basic
+        if ai_scraper.is_available() and refresh:
+            logger.info("🤖 Enhancing product descriptions with AI")
+            try:
+                # Enhance descriptions for products with missing or short descriptions
+                async def enhance_description_for_group(group: Dict[str, Any]) -> None:
+                    canonical = group.get("canonical_product", {})
+                    current_desc = canonical.get("description", "")
+                    
+                    # Enhance if description is missing, too short, or too basic
+                    if not current_desc or len(current_desc) < 80 or "Fresh" in current_desc and len(current_desc) < 100:
+                        enhanced = await ai_scraper.enhance_product_description(
+                            canonical.get("name", ""),
+                            canonical.get("brand"),
+                            canonical.get("quantity"),
+                            current_desc if current_desc else None
+                        )
+                        if enhanced:
+                            canonical["description"] = enhanced
+                            logger.debug(f"✅ Enhanced description for {canonical.get('name', 'Unknown')[:50]}")
+                
+                # Enhance descriptions concurrently (limit to avoid too many API calls)
+                groups_to_enhance = [g for g in list(grouped.values())[:5] if not g.get("canonical_product", {}).get("description") or len(g.get("canonical_product", {}).get("description", "")) < 80]
+                if groups_to_enhance:
+                    await asyncio.gather(*(enhance_description_for_group(g) for g in groups_to_enhance))
+                    
+            except Exception as e:
+                logger.warning(f"Description enhancement failed: {e}")
+
+        # Optional: Enrich with AI scraper for missing prices (if available)
+        if ai_scraper.is_available() and refresh:
+            logger.info("🤖 Using AI scraper to enrich products with prices")
+            try:
+                # Collect all offers that need price enrichment
+                offers_to_enrich = []
+                for result in grouped.values():
+                    for offer in result.get("offers", []):
+                        if offer.get("product_url") and offer.get("price") is None:
+                            offers_to_enrich.append(offer)
+                
+                if offers_to_enrich:
+                    # Enrich offers with prices (limit to 10 for performance)
+                    enriched_offers = await ai_scraper.enrich_products_with_prices(
+                        offers_to_enrich[:10],  # Limit to 10 to control cost/time
+                        max_concurrent=3
+                    )
+                    
+                    # Update offers with enriched data
+                    offer_map = {o.get("product_url"): o for o in enriched_offers}
+                    for result in grouped.values():
+                        canonical = result.get("canonical_product", {})
+                        for offer in result.get("offers", []):
+                            url = offer.get("product_url")
+                            if url and url in offer_map:
+                                enriched = offer_map[url]
+                                if enriched.get("price") is not None:
+                                    offer["price"] = enriched["price"]
+                                    offer["currency"] = enriched.get("currency", "USD")
+                                    if enriched.get("price_text"):
+                                        offer["price_text"] = enriched["price_text"]
+                                
+                                # Enhance description if available and better
+                                if enriched.get("description") and len(enriched.get("description", "")) > 50:
+                                    # Use AI-generated description if it's more detailed
+                                    if not canonical.get("description") or len(canonical.get("description", "")) < len(enriched.get("description", "")):
+                                        canonical["description"] = enriched["description"]
+                                
+                                offer["source"].append("ai_scraper")
+                    
+                    logger.info(f"✅ Enriched {len(enriched_offers)} offers with AI scraper")
+                    
+            except Exception as e:
+                logger.warning(f"AI scraper enrichment failed: {e}")
 
         response = {
             "query": query,
@@ -842,7 +936,7 @@ async def aggregate_products(
 
         # Cache the results
         logger.info(f"cache_miss aggregate zip={zipcode} q='{query}' -> setting cache")
-        await cache.set_json(cache_key, response, ttl_seconds=60 * 60 * 4)  # 4 hours
+        await cache.set_json(cache_key, response, ttl_seconds=60 * 15)  # 15 minutes instead of 4 hours
         
         return {**response, "cache": {"hit": False}}
         

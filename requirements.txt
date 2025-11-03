@@ -16,3 +16,10 @@ redis[hiredis]==5.0.1
 
 # Data Models
 pydantic>=2.0.0
+
+# AI-Powered Scraping (Optional - for direct price extraction)
+# Fast HTTP mode - no browser needed!
+beautifulsoup4>=4.12.0  # Fast HTML parsing
+lxml>=4.9.0  # Fast XML/HTML parser (optional but recommended)
+openai>=1.0.0  # Optional - for GPT-based extraction
+anthropic>=0.18.0  # Optional - for Claude-based extraction

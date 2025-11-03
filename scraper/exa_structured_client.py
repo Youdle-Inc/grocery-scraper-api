@@ -276,13 +276,13 @@ class ExaStructuredClient:
             
             logger.info(f"🔍 Searching Exa for: {search_query} (Category: {category}, Context: {context or 'auto-detected'})")
             
-            # Search with text content extraction
+            # Search with text content extraction - get more text for better descriptions
             # Request more results since we filter out category pages
             search_options = {
                 "query": search_query,
                 "num_results": min(num_results * 3, 50),  # Request 3x to account for filtering
                 "type": "neural",  # Neural search for semantic matching
-                "text": {"max_characters": 2000}  # Get more text content
+                "text": {"max_characters": 3000}  # Get more text content for better descriptions
             }
 
             # Add domain filter if store specified
@@ -398,6 +398,156 @@ class ExaStructuredClient:
 
         return products
     
+    
+    def _extract_product_description(self, text: str, title: str) -> Optional[str]:
+        """Extract clean, meaningful product description from text"""
+        if not text:
+            return None
+        
+        import re
+        
+        # Aggressive cleaning - remove all navigation/UI elements
+        text = re.sub(r'\[skip to [^\]]+\]', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\[[^\]]+\]\([^\)]+\)', '', text)  # Remove markdown links
+        text = re.sub(r'https?://[^\s]+', '', text)  # Remove URLs
+        text = re.sub(r'Target Circle[™®]?|Registry|Wish List|Weekly Ad|Find Stores|Categories|Deals|New & featured|Pickup|delivery', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'Robot or human\?.*?Thank You!', '', text, flags=re.IGNORECASE | re.DOTALL)
+        text = re.sub(r'Sponsored|Add to cart|Add to list|Sign in|Shipping|Return this item|Eligible for|At a glance|About this item|Details|Label info', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'Specifications & Returns|Q&A|Additional product information|recommendations|Load all content|Discover more options|Loading content|Buy it again|Frequently bought together|Gue', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'registries and s|## |###|Your views|This product is featured|Featured products|ratings & reviews|Disclaimer|Get top|latest trends', '', text, flags=re.IGNORECASE)  # Remove markdown headers and navigation
+        text = re.sub(r'and at once|sts also viewed', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\( \( search|! ! !|# #|###', '', text)  # Remove weird formatting
+        text = re.sub(r'\$\d+\.\d+/[^\s]+', '', text)  # Remove unit prices like "$9.07/fluid ounce"
+        text = re.sub(r'out of 5 stars|reviews?\s*\d+', '', text, flags=re.IGNORECASE)  # Remove rating text
+        text = re.sub(r'Gluten Free|Sponsored|Search', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'Only at [a-z\s]+', '', text, flags=re.IGNORECASE)  # Remove "Only at target"
+        text = re.sub(r'Free & easy returns.*?days', '', text, flags=re.IGNORECASE | re.DOTALL)  # Remove return policy
+        text = re.sub(r'by mail or in store|for a full refund', '', text, flags=re.IGNORECASE)
+        # Fix formatting issues
+        text = re.sub(r'Fat Content(\d+)', r'Fat Content: \1%', text, flags=re.IGNORECASE)  # Fix "Fat Content1" -> "Fat Content: 1%"
+        text = re.sub(r'Fat Content:\s*(\d+)%\s*Percent', r'Fat Content: \1%', text, flags=re.IGNORECASE)  # Fix "Fat Content: 1% Percent" -> "Fat Content: 1%"
+        text = re.sub(r'Size(\d+\.?\d*)', r'Size: \1', text, flags=re.IGNORECASE)  # Fix "Size0.5" -> "Size: 0.5"
+        text = re.sub(r'-{2,}', ' ', text)  # Replace multiple dashes with space
+        text = re.sub(r'\s+-\s+-\s+', ' ', text)  # Fix " - - " patterns
+        text = re.sub(r'\s+-\s+$', '', text)  # Remove trailing dashes
+        text = re.sub(r'Percent\s*-\s*-', 'Percent', text, flags=re.IGNORECASE)  # Fix "Percent - -"
+        text = re.sub(r'Gallon\s*-\s*-', 'Gallon', text, flags=re.IGNORECASE)  # Fix "Gallon - -"
+        text = re.sub(r'\s+', ' ', text)  # Normalize whitespace
+        # Final cleanup - remove any remaining "Only at" patterns
+        text = re.sub(r'Only at\s+\w+', '', text, flags=re.IGNORECASE)
+        
+        # Look for actual product description patterns
+        # Pattern 1: "About this item" or "Details" sections
+        about_match = re.search(r'(?:about|details|description|overview|product info)[\s:]+(.+?)(?:sponsored|additional|discover|more|$)', text, re.IGNORECASE | re.DOTALL)
+        if about_match:
+            desc_text = about_match.group(1)
+            # Clean it further
+            desc_text = re.sub(r'\s+', ' ', desc_text).strip()
+            if len(desc_text) > 30:
+                # Take first 200 chars
+                desc_text = desc_text[:200] if len(desc_text) <= 200 else desc_text[:197] + '...'
+                return desc_text
+        
+        # Pattern 2: Look for sentences with product keywords
+        sentences = re.split(r'[.!?]\s+', text)
+        meaningful_sentences = []
+        
+        skip_patterns = [
+            r'^skip to|^terms of use|^privacy policy|^activate and hold|^thank you',
+            r'^banner|^cookie|^javascript|^enable|^loading|^return|^eligible',
+            r'^sponsored|^add to|^sign in|^shipping|^free|^easy',
+            r'^\s*$|^[^\w]*$|^[()\[\]{}]+$',  # Empty or only symbols
+            r'^\d+\.\d+$|^\d+$'  # Just numbers
+        ]
+        
+        product_keywords = [
+            'organic', 'whole', 'fat', 'reduced', 'low fat', 'skim', 'fresh', 'natural',
+            'pasteurized', 'homogenized', 'vitamin', 'calcium', 'protein', 'nutrition',
+            'ingredients', 'allergen', 'contains', 'gluten', 'dairy', 'cage free',
+            'free range', 'grade a', 'large', 'extra large', 'gallon', 'fluid ounce',
+            'wheat', 'whole grain', 'sliced', 'enriched', 'fortified'
+        ]
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence or len(sentence) < 15:
+                continue
+            
+            # Skip navigation/UI text
+            skip = False
+            for pattern in skip_patterns:
+                if re.search(pattern, sentence, re.IGNORECASE):
+                    skip = True
+                    break
+            
+            if skip:
+                continue
+            
+            # Must not contain navigation chars or junk text
+            if any(char in sentence for char in ['[', ']', '{', '}', 'http', 'www.', '* * *']):
+                continue
+            
+            # Skip sentences with navigation words
+            junk_words = ['specifications', 'returns', 'q&a', 'additional', 'recommendations', 
+                         'loading', 'discover', 'buy it again', 'frequently bought', 'featured',
+                         'ratings & reviews', 'disclaimer', 'get top', 'latest trends', 
+                         'and at once', 'also viewed', 'your views', 'target finds']
+            sentence_lower = sentence.lower()
+            if any(junk in sentence_lower for junk in junk_words):
+                continue
+            
+            # Check if it contains product keywords or looks like descriptive content
+            has_keywords = any(keyword in sentence_lower for keyword in product_keywords)
+            is_descriptive = len(sentence) > 40 and not re.search(r'^\d+', sentence) and not re.search(r'^\s*[*#]', sentence)
+            
+            if has_keywords or is_descriptive:
+                # Clean sentence
+                sentence = re.sub(r'\s+', ' ', sentence).strip()
+                sentence = re.sub(r'\s*[*#]+\s*', ' ', sentence)  # Remove asterisks and hashes
+                if len(sentence) > 20:  # Only add if meaningful length
+                    meaningful_sentences.append(sentence)
+                
+                # Limit to 2-3 best sentences
+                if len(meaningful_sentences) >= 3:
+                    break
+        
+        if meaningful_sentences:
+            description = '. '.join(meaningful_sentences)
+            description = re.sub(r'\s+', ' ', description).strip()
+            
+            # Final cleanup - remove all remaining formatting issues
+            description = re.sub(r'\s+-\s+-\s+', ' ', description)  # Remove " - - " patterns
+            description = re.sub(r'\s+-\s+$', '', description)  # Remove trailing dashes
+            description = re.sub(r'^\s*-\s*', '', description)  # Remove leading dashes
+            description = re.sub(r'^[^\w]+|[^\w]+$', '', description)  # Remove leading/trailing non-word chars
+            description = re.sub(r'\s+', ' ', description).strip()  # Final whitespace normalization
+            
+            if len(description) > 20:
+                # Limit length
+                if len(description) > 300:
+                    description = description[:297] + '...'
+                return description
+        
+        # Fallback: Generate description from title if we have product info
+        if title and len(title) > 5:
+            # Try to create a simple description from title
+            title_lower = title.lower()
+            desc_parts = []
+            
+            if 'organic' in title_lower:
+                desc_parts.append('Organic product')
+            if any(word in title_lower for word in ['milk', 'dairy']):
+                desc_parts.append('Fresh dairy product')
+            if any(word in title_lower for word in ['egg', 'eggs']):
+                desc_parts.append('Fresh eggs')
+            if any(word in title_lower for word in ['bread']):
+                desc_parts.append('Fresh baked bread')
+            
+            if desc_parts:
+                return '. '.join(desc_parts) + '.'
+        
+        return None
+    
     def _extract_product_data(
         self,
         result: Any,
@@ -411,7 +561,13 @@ class ExaStructuredClient:
             # Get title and URL
             title = getattr(result, "title", "Unknown Product")
             url = getattr(result, "url", None)
-            text = getattr(result, "text", "")[:2000] if hasattr(result, "text") else ""
+            text = getattr(result, "text", "")[:3000] if hasattr(result, "text") else ""
+            
+            # Try to get Exa summary for better description (if available)
+            exa_summary = None
+            if hasattr(result, "summary") and result.summary:
+                exa_summary = result.summary
+                logger.debug(f"✅ Got Exa summary for {title[:50]}")
 
             # Extract price from text content using regex
             price = None
@@ -489,6 +645,9 @@ class ExaStructuredClient:
                 elif "aldi.us" in url:
                     detected_store = "ALDI"
 
+            # Clean and extract meaningful description
+            description = self._extract_product_description(text, title)
+            
             # Build product object
             product = {
                 "name": title,
@@ -499,7 +658,7 @@ class ExaStructuredClient:
                 "availability": "Check Store",
                 "image_url": image_url,
                 "product_url": url,
-                "description": text[:200] if text else None,
+                "description": description,
                 "category": None,
                 "rating": None,
                 "reviews_count": None,
