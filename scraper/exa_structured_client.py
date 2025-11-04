@@ -277,7 +277,8 @@ class ExaStructuredClient:
             logger.info(f"🔍 Searching Exa for: {search_query} (Category: {category}, Context: {context or 'auto-detected'})")
             
             # Search with text content extraction - get more text for better descriptions
-            # Request more results since we filter out category pages
+            # Note: Exa's search_and_contents doesn't support summary parameter
+            # Use get_contents with summary for individual URLs if needed
             search_options = {
                 "query": search_query,
                 "num_results": min(num_results * 3, 50),  # Request 3x to account for filtering
@@ -398,6 +399,31 @@ class ExaStructuredClient:
 
         return products
     
+    
+    def _clean_exa_summary(self, summary: str) -> Optional[str]:
+        """Clean and format Exa AI-generated summary"""
+        if not summary:
+            return None
+        
+        import re
+        # Exa summaries are usually clean, but remove any artifacts
+        summary = re.sub(r'\[skip to [^\]]+\]', '', summary, flags=re.IGNORECASE)
+        summary = re.sub(r'\[[^\]]+\]\([^\)]+\)', '', summary)
+        summary = re.sub(r'https?://[^\s]+', '', summary)
+        summary = re.sub(r'\s+', ' ', summary).strip()
+        
+        # Limit length but keep informative
+        if len(summary) > 500:
+            sentences = summary.split('. ')
+            result = []
+            for sentence in sentences:
+                if len('. '.join(result + [sentence])) <= 500:
+                    result.append(sentence)
+                else:
+                    break
+            summary = '. '.join(result) + '.' if result else summary[:497] + '...'
+        
+        return summary if len(summary) > 20 else None
     
     def _extract_product_description(self, text: str, title: str) -> Optional[str]:
         """Extract clean, meaningful product description from text"""
@@ -646,7 +672,12 @@ class ExaStructuredClient:
                     detected_store = "ALDI"
 
             # Clean and extract meaningful description
-            description = self._extract_product_description(text, title)
+            # Prefer Exa summary (AI-generated, much better quality)
+            if exa_summary:
+                description = self._clean_exa_summary(exa_summary)
+            else:
+                # Fallback to text extraction
+                description = self._extract_product_description(text, title)
             
             # Build product object
             product = {

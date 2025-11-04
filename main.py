@@ -37,6 +37,12 @@ from scraper.models import (
     StoreDetailsResponse,
     ProductsSearchResponse,
     AggregateResponse,
+    AggregateResponseEnhanced,
+    ProductResultEnhanced,
+    OfferEnhanced,
+    StoreInfoDetailed,
+    ProductImage,
+    NutritionInfo,
 )
 from scraper.image_scraper import ImageScraper
 from scraper.ai_scraper import AIScraper
@@ -510,10 +516,20 @@ async def search_products(
 
 @app.get(
     "/products/aggregate",
-    response_model=AggregateResponse,
+    response_model=AggregateResponseEnhanced,
     tags=["📊 Aggregate"],
     response_model_exclude_none=True,
     response_class=PrettyJSONResponse,
+    responses={
+        200: {
+            "description": "Aggregate product results",
+            "content": {
+                "application/json": {
+                    "schema": AggregateResponse.model_json_schema()
+                }
+            }
+        }
+    },
     summary="Compare Products Across Stores",
     description="""
     Compare the same products across multiple stores to find the best deals.
@@ -747,35 +763,47 @@ async def aggregate_products(
                 })
 
         # Enrich images for better consistency
-        async def derive_image_from_product_url(product_url: Optional[str]) -> Optional[str]:
-            """Derive image URL from product URL - fastest and most accurate method"""
+        async def derive_image_from_product_url(product_url: Optional[str], exa_image: Optional[str] = None) -> Optional[str]:
+            """Derive image URL - prefer Exa's image field, fallback to URL derivation"""
+            # Priority 1: Use Exa's image field if available (most reliable)
+            if exa_image:
+                return exa_image
+            
             if not product_url:
                 return None
             try:
                 url = product_url.lower()
                 
-                # Target: Most reliable - Scene7 CDN format
+                # Target: Try different image CDN formats
                 if "target.com" in url and "/a-" in url:
                     try:
                         pid = product_url.split("/A-")[1].split("/")[0]
-                        return f"https://target.scene7.com/is/image/Target/{pid}?wid=1200&hei=1200&qlt=80&fmt=webp"
+                        # Try multiple Target image formats
+                        formats = [
+                            f"https://target.scene7.com/is/image/Target/{pid}",
+                            f"https://target.scene7.com/is/image/Target/{pid}?wid=1200&hei=1200&qlt=80&fmt=webp",
+                            f"https://target.scene7.com/is/image/Target/{pid}?wid=800&hei=800&qlt=80&fmt=webp"
+                        ]
+                        # Return first format - will validate later if needed
+                        return formats[1]  # Use webp format
                     except Exception:
                         pass
                 
                 # Walmart: Extract product ID from URL
                 if "walmart.com" in url and "/ip/" in url:
                     try:
-                        # Walmart format: /ip/Product-Name/12345678
                         match = re.search(r'/ip/[^/]+/(\d+)', url)
                         if match:
                             product_id = match.group(1)
                             # Try multiple Walmart CDN patterns
-                            return f"https://i5.walmartimages.com/asr/{product_id}.jpeg?odnHeight=612&odnWidth=612&odnBg=FFFFFF"
+                            formats = [
+                                f"https://i5.walmartimages.com/asr/{product_id}.jpeg?odnHeight=612&odnWidth=612&odnBg=FFFFFF",
+                                f"https://i5.walmartimages.com/asr/{product_id}.jpeg",
+                                f"https://i5.walmartimages.com/seo/{product_id}.jpeg"
+                            ]
+                            return formats[0]
                     except Exception:
                         pass
-                
-                # Whole Foods / Amazon Fresh: Use product URL directly with image parameter
-                # (These typically have images embedded in the page, less reliable)
                 
                 return None
             except Exception:
@@ -790,21 +818,22 @@ async def aggregate_products(
                     canonical = group["canonical_product"]
                     image_set = set()
 
-                    # PRIORITY 1: Always derive from product URLs first (fastest, most accurate)
+                    # PRIORITY 1: Use Exa-provided images first (most reliable)
                     for offer in group["offers"]:
-                        product_url = offer.get("product_url")
-                        if product_url:
-                            derived = await derive_image_from_product_url(product_url)
-                            if derived:
-                                image_set.add(derived)
-                                # Set this as the offer's image_url immediately
-                                offer["image_url"] = derived
-
-                    # PRIORITY 2: Use any images already provided by Exa
-                    for offer in group["offers"]:
-                        offer_img = offer.get("image_url")
-                        if offer_img:
-                            image_set.add(offer_img)
+                        exa_img = offer.get("image_url")  # Already set from Exa if available
+                        if exa_img:
+                            image_set.add(exa_img)
+                    
+                    # PRIORITY 2: Derive from product URLs if no Exa images
+                    if not image_set:
+                        for offer in group["offers"]:
+                            product_url = offer.get("product_url")
+                            exa_img = offer.get("image_url")  # May have been set from Exa
+                            if product_url:
+                                derived = await derive_image_from_product_url(product_url, exa_img)
+                                if derived:
+                                    image_set.add(derived)
+                                    offer["image_url"] = derived
 
                     # PRIORITY 3: Only if still empty, fallback to Exa search (slowest)
                     if not image_set and exa_client.is_available():
@@ -926,19 +955,163 @@ async def aggregate_products(
             except Exception as e:
                 logger.warning(f"AI scraper enrichment failed: {e}")
 
-        response = {
+        # Transform to enhanced format
+        async def transform_to_enhanced_format(grouped_results: Dict[str, Any], stores_considered: List[str], query: str, zipcode: str) -> Dict[str, Any]:
+            """Transform grouped results to enhanced response format"""
+            from datetime import datetime
+            
+            enhanced_results = []
+            search_timestamp = datetime.utcnow().isoformat() + "Z"
+            scraped_at = datetime.utcnow().isoformat() + "Z"
+            
+            for group in grouped_results.values():
+                canonical = group.get("canonical_product", {})
+                offers = group.get("offers", [])
+                
+                # Extract product images
+                images = []
+                for idx, img_url in enumerate(canonical.get("images", []) or []):
+                    if img_url:
+                        images.append({
+                            "url": img_url,
+                            "is_primary": idx == 0
+                        })
+                
+                # Extract category path from description/name
+                category_path = []
+                if canonical.get("category"):
+                    category_path = [canonical["category"]]
+                elif "milk" in (canonical.get("name") or "").lower():
+                    category_path = ["Dairy & Eggs", "Milk"]
+                elif "egg" in (canonical.get("name") or "").lower():
+                    category_path = ["Dairy & Eggs", "Eggs"]
+                elif "bread" in (canonical.get("name") or "").lower():
+                    category_path = ["Bakery", "Bread"]
+                
+                # Extract retailer SKU from product URL
+                retailer_sku = None
+                for offer in offers:
+                    product_url = offer.get("product_url", "")
+                    if "target.com" in product_url and "/A-" in product_url:
+                        try:
+                            retailer_sku = product_url.split("/A-")[1].split("/")[0]
+                            break
+                        except:
+                            pass
+                    elif "walmart.com" in product_url and "/ip/" in product_url:
+                        try:
+                            match = re.search(r'/ip/[^/]+/(\d+)', product_url)
+                            if match:
+                                retailer_sku = match.group(1)
+                                break
+                        except:
+                            pass
+                
+                # Transform offers
+                enhanced_offers = []
+                for offer in offers:
+                    store_id = offer.get("store_id", "")
+                    store_name = offer.get("store_name", "")
+                    
+                    # Determine fulfillment options
+                    fulfillment = []
+                    if store_id in ["target", "walmart"]:
+                        fulfillment = ["PICKUP", "DELIVERY"]
+                    else:
+                        fulfillment = ["IN_STORE"]
+                    
+                    # Determine availability
+                    availability = offer.get("availability", "CHECK_STORE")
+                    if availability and "stock" in availability.lower():
+                        if "out" in availability.lower():
+                            availability = "OUT_OF_STOCK"
+                        elif "low" in availability.lower():
+                            availability = "LOW_STOCK"
+                        else:
+                            availability = "IN_STOCK"
+                    else:
+                        availability = "CHECK_STORE"
+                    
+                    # Determine prices
+                    regular_price = None
+                    sale_price = None
+                    price = offer.get("price")
+                    if price:
+                        if isinstance(price, (int, float)):
+                            regular_price = float(price)
+                            # Assume no sale price for now
+                    
+                    # Create store info
+                    store_info = StoreInfoDetailed(
+                        retailer=store_id,
+                        retailer_store_id=retailer_sku if store_id == store_name.lower().replace(" ", "_") else None,
+                        store_name=store_name,
+                        address=offer.get("address"),
+                        city=offer.get("city"),
+                        state=offer.get("state"),
+                        zipcode=offer.get("zipcode") or zipcode
+                    )
+                    
+                    enhanced_offer_dict = {
+                        "store": store_info.model_dump(exclude_none=True),
+                        "product_url": offer.get("product_url", ""),
+                        "fulfillment": fulfillment,
+                        "availability": availability,
+                        "inventory_count": None,
+                        "regular_price": regular_price,
+                        "sale_price": sale_price,
+                        "price_updated_at": scraped_at if price else None,
+                        "promo_badge": None
+                    }
+                    enhanced_offers.append(enhanced_offer_dict)
+                
+                # Create enhanced product result
+                enhanced_product_dict = {
+                    "upc": None,
+                    "retailer_sku": retailer_sku,
+                    "name": canonical.get("name", "Unknown Product"),
+                    "brand": canonical.get("brand"),
+                    "category_path": category_path,
+                    "description": canonical.get("description"),
+                    "size": canonical.get("quantity") or canonical.get("size"),
+                    "package_quantity": canonical.get("quantity") or canonical.get("size"),
+                    "images": images,
+                    "nutrition": None,
+                    "offers": enhanced_offers,
+                    "source": "scraper_v2",
+                    "scraped_at": scraped_at
+                }
+                enhanced_results.append(enhanced_product_dict)
+            
+            return {
+                "query": query,
+                "zipcode": zipcode,
+                "search_timestamp": search_timestamp,
+                "results": enhanced_results,
+                "stores_considered": stores_considered,
+                "meta": {
+                    "api_version": "2.1.0",
+                    "cache": {"hit": False}
+                }
+            }
+        
+        # Create both formats
+        standard_response = {
             "query": query,
             "zipcode": zipcode,
             "stores_considered": considered_store_ids,
             "results": list(grouped.values()),
             "source": "exa_structured_aggregate"
         }
-
-        # Cache the results
-        logger.info(f"cache_miss aggregate zip={zipcode} q='{query}' -> setting cache")
-        await cache.set_json(cache_key, response, ttl_seconds=60 * 15)  # 15 minutes instead of 4 hours
         
-        return {**response, "cache": {"hit": False}}
+        enhanced_response = await transform_to_enhanced_format(grouped, considered_store_ids, query, zipcode)
+
+        # Cache the results (store standard format)
+        logger.info(f"cache_miss aggregate zip={zipcode} q='{query}' -> setting cache")
+        await cache.set_json(cache_key, standard_response, ttl_seconds=60 * 15)
+        
+        # Return enhanced format
+        return enhanced_response
         
     except HTTPException:
         raise

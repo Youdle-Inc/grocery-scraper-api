@@ -222,3 +222,56 @@ class AggregateResponse(BaseModel):
     results: List[AggregateResult]
     source: str
     cache: Optional[Dict[str, Any]] = None
+
+# New models for enhanced response structure
+class ProductImage(BaseModel):
+    url: str
+    is_primary: bool = True
+
+class NutritionInfo(BaseModel):
+    calories: Optional[int] = None
+    serving_size: Optional[str] = None
+    servings_per_container: Optional[int] = None
+
+class StoreInfoDetailed(BaseModel):
+    retailer: str
+    retailer_store_id: Optional[str] = None
+    store_name: str
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    zipcode: Optional[str] = None
+
+class OfferEnhanced(BaseModel):
+    store: StoreInfoDetailed
+    product_url: str
+    fulfillment: List[str] = []  # PICKUP, DELIVERY, IN_STORE
+    availability: str = "CHECK_STORE"  # IN_STOCK, LOW_STOCK, OUT_OF_STOCK, CHECK_STORE
+    inventory_count: Optional[int] = None
+    regular_price: Optional[float] = None
+    sale_price: Optional[float] = None
+    price_updated_at: Optional[str] = None
+    promo_badge: Optional[str] = None
+
+class ProductResultEnhanced(BaseModel):
+    upc: Optional[str] = None
+    retailer_sku: Optional[str] = None
+    name: str
+    brand: Optional[str] = None
+    category_path: List[str] = []
+    description: Optional[str] = None
+    size: Optional[str] = None
+    package_quantity: Optional[str] = None
+    images: List[ProductImage] = []
+    nutrition: Optional[NutritionInfo] = None
+    offers: List[OfferEnhanced] = []
+    source: str = "scraper_v2"
+    scraped_at: Optional[str] = None
+
+class AggregateResponseEnhanced(BaseModel):
+    query: str
+    zipcode: str
+    search_timestamp: str
+    results: List[ProductResultEnhanced]
+    stores_considered: List[str]
+    meta: Dict[str, Any]
