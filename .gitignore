@@ -68,3 +68,20 @@ coverage.xml
 # Docker
 .dockerignore
 .vercel
+
+# History files (backup/archive)
+.history/
+
+# Test files
+test_*.py
+TEST_*.sh
+run_all_tests.sh
+
+# Old documentation (keep only README.md)
+CURL_COMMANDS.md
+CURL_TEST_COMMANDS.md
+TEST_ENDPOINTS.md
+API_REFERENCE.md
+
+# Static files (not used in current implementation)
+static/
