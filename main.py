@@ -589,6 +589,7 @@ async def search_products(
     - `zipcode` (required): 5-digit ZIP code
     - `radius_miles`: Search radius in miles (default: 10)
     - `stores`: Comma-separated store IDs to search (e.g., "target,walmart")
+    - `limit`: Maximum number of products to return (default: 50, max: 100)
     - `refresh`: Bypass cache (default: false)
 
     **Example Requests:**
@@ -596,6 +597,7 @@ async def search_products(
     GET /products/aggregate?query=eggs&zipcode=60601
     GET /products/aggregate?query=milk&zipcode=60601&stores=target,walmart
     GET /products/aggregate?query=bread&zipcode=10001&radius_miles=15
+    GET /products/aggregate?query=eggs&zipcode=60601&limit=10
     ```
 
     **Example Response:**
@@ -653,6 +655,7 @@ async def aggregate_products(
     zipcode: str = Query(..., description="5-digit ZIP code", example="60601"),
     radius_miles: int = Query(10, ge=1, le=50, description="Search radius in miles"),
     stores: Optional[str] = Query(None, description="Comma-separated store IDs", example="target,walmart"),
+    limit: int = Query(50, ge=1, le=100, description="Maximum number of products to return"),
     refresh: bool = Query(False, description="Bypass cache")
 ):
     """Compare products across multiple stores"""
@@ -705,14 +708,16 @@ async def aggregate_products(
             return mapping.get(store_id, store_id.replace("_", " ").title())
 
         # Cache lookup
-        cache_key = f"aggregate:{zipcode}:{query}:{':'.join(sorted(considered_store_ids))}"
+        cache_key = f"aggregate:{zipcode}:{query}:{':'.join(sorted(considered_store_ids))}:limit{limit}"
         cached = None if refresh else await cache.get_json(cache_key)
         if cached and not refresh:
             logger.info(f"cache_hit aggregate zip={zipcode} q='{query}'")
             # Check if cached data is in enhanced format (has search_timestamp and meta)
             if cached.get("search_timestamp") and cached.get("meta"):
-                # Already in enhanced format, just update cache hit status
+                # Already in enhanced format, just update cache hit status and apply limit
                 cached["meta"]["cache"] = {"hit": True}
+                if limit and len(cached.get("results", [])) > limit:
+                    cached["results"] = cached["results"][:limit]
                 return cached
             else:
                 # Old standard format cached, need to transform it
@@ -753,6 +758,9 @@ async def aggregate_products(
                     store_locations_cache
                 )
                 enhanced_cached["meta"]["cache"] = {"hit": True}
+                # Apply limit if needed
+                if limit and len(enhanced_cached.get("results", [])) > limit:
+                    enhanced_cached["results"] = enhanced_cached["results"][:limit]
                 return enhanced_cached
 
         if not exa_client.is_available():
@@ -1278,6 +1286,10 @@ async def aggregate_products(
         }
         
         enhanced_response = await transform_to_enhanced_format(grouped, considered_store_ids, query, zipcode, store_locations_cache)
+
+        # Apply limit to results
+        if limit and len(enhanced_response.get("results", [])) > limit:
+            enhanced_response["results"] = enhanced_response["results"][:limit]
 
         # Cache the results (store enhanced format for future use)
         logger.info(f"cache_miss aggregate zip={zipcode} q='{query}' -> setting cache")

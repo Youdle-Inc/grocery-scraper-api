@@ -71,6 +71,9 @@ curl "https://grocery-scraper-api.vercel.app/products/search?query=organic+banan
 # Compare eggs across all stores in ZIP code 60601
 curl "https://grocery-scraper-api.vercel.app/products/aggregate?query=eggs&zipcode=60601"
 
+# Compare eggs with limit (return only 10 products)
+curl "https://grocery-scraper-api.vercel.app/products/aggregate?query=eggs&zipcode=60601&limit=10"
+
 # Compare milk at Target and Walmart only
 curl "https://grocery-scraper-api.vercel.app/products/aggregate?query=milk&zipcode=60601&stores=target,walmart"
 
@@ -79,6 +82,9 @@ curl "https://grocery-scraper-api.vercel.app/products/aggregate?query=bread&zipc
 
 # Aggregate with refresh (bypass cache)
 curl "https://grocery-scraper-api.vercel.app/products/aggregate?query=eggs&zipcode=60601&refresh=true"
+
+# Limit results to top 5 products
+curl "https://grocery-scraper-api.vercel.app/products/aggregate?query=eggs&zipcode=60601&limit=5"
 
 # Pretty print JSON response
 curl "https://grocery-scraper-api.vercel.app/products/aggregate?query=eggs&zipcode=60601" | jq
