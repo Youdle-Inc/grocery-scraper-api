@@ -115,15 +115,25 @@ class ExaStructuredClient:
         """Build enhanced search query with context"""
         # For better product results, make query more specific
         # Add common product variations to get individual product pages
+        
+        # Detect if query is a liquid product (milk, juice, etc.) that uses gallons
+        liquid_products = ["milk", "juice", "water", "soda", "beer", "wine"]
+        is_liquid = any(liquid in query.lower() for liquid in liquid_products)
+        
         if store_name and store_name != "grocery store":
-            if len(query.split()) == 1:  # Single word like "milk"
-                # Expand to find specific products
+            if len(query.split()) == 1 and is_liquid:  # Single word liquid product like "milk"
+                # Expand to find specific products with size
                 base_query = f"{query} gallon {store_name} product"
+            elif len(query.split()) == 1:  # Single word non-liquid product like "bread"
+                # Just add store name, don't add "gallon"
+                base_query = f"{query} {store_name} product"
             else:
                 base_query = f"{query} {store_name}"
         else:
-            if len(query.split()) == 1:
+            if len(query.split()) == 1 and is_liquid:
                 base_query = f"{query} gallon grocery product"
+            elif len(query.split()) == 1:
+                base_query = f"{query} grocery product"
             else:
                 base_query = f"{query} grocery"
 
@@ -284,7 +294,10 @@ class ExaStructuredClient:
                 "num_results": min(num_results * 3, 50),  # Request 3x to account for filtering
                 "type": "neural",  # Neural search for semantic matching
                 "text": {"max_characters": 3000}  # Get more text content for better descriptions
+                # Note: extras/image_links is only available in get_contents, not search_and_contents
             }
+            
+            logger.debug(f"Exa search options: {search_options}")
 
             # Add domain filter if store specified
             if store_name:
@@ -293,13 +306,24 @@ class ExaStructuredClient:
                     search_options["include_domains"] = [domain]
 
             # Execute search
-            response = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self._client.search_and_contents(**search_options)
-            )
-            
-            # Process results
-            products = self._process_search_results(response, store_name, zipcode)
+            try:
+                logger.info(f"📡 Calling Exa API with query: {search_query}")
+                response = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: self._client.search_and_contents(**search_options)
+                )
+                
+                if not response:
+                    logger.warning("⚠️ Exa returned None response")
+                    return []
+                
+                logger.info(f"📥 Exa response received: {type(response)}")
+                
+                # Process results
+                products = await self._process_search_results(response, store_name, zipcode)
+            except Exception as e:
+                logger.error(f"❌ Exa API call failed: {e}", exc_info=True)
+                return []
 
             # Limit to requested number
             products = products[:num_results]
@@ -339,17 +363,20 @@ class ExaStructuredClient:
         if not url:
             return False
 
-        # Filter out search and category pages
+        # Filter out obvious search and category pages
         exclude_patterns = [
+            '/search',
+            '/category',
+            '/browse',
             '/s/',  # Target search pages
             '/c/',  # Target category pages
-            '/browse/',  # Walmart browse pages
             '?Nao=',  # Pagination
             'Page ',  # Page indicators in title
         ]
 
+        url_lower = url.lower()
         for pattern in exclude_patterns:
-            if pattern in url or pattern in title:
+            if pattern in url_lower or pattern in title:
                 return False
 
         # Check for product page indicators
@@ -357,15 +384,26 @@ class ExaStructuredClient:
             '/p/',  # Target product pages
             '/ip/',  # Walmart individual product pages
             '/A-',  # Target product ID
+            '/product/',  # Generic product pages
+            '/products/',  # Generic products pages
+            '/item/',  # Item pages
+            '/store/',  # Store pages (might be product pages)
         ]
 
         for indicator in product_indicators:
-            if indicator in url:
+            if indicator in url_lower:
+                return True
+        
+        # If URL contains common store domains and doesn't look like a search page, assume it might be a product
+        store_domains = ['target.com', 'walmart.com', 'wholefoodsmarket.com', 'kroger.com', 'aldi.us']
+        if any(domain in url_lower for domain in store_domains):
+            # If it's not clearly a search/category page, give it a chance
+            if not any(exclude in url_lower for exclude in ['/search', '/category', '/browse', '/s/', '/c/']):
                 return True
 
         return False
 
-    def _process_search_results(
+    async def _process_search_results(
         self,
         response: Any,
         store_name: Optional[str],
@@ -376,24 +414,55 @@ class ExaStructuredClient:
 
         try:
             results = getattr(response, "results", [])
+            logger.info(f"🔍 Processing {len(results)} results from Exa")
 
-            for result in results:
+            for idx, result in enumerate(results):
                 try:
                     # Check if this is an actual product page
                     url = getattr(result, "url", "")
                     title = getattr(result, "title", "")
 
-                    if not self._is_product_page(url, title):
-                        logger.debug(f"Skipping non-product page: {title}")
+                    if not url:
+                        logger.debug(f"Skipping result {idx}: No URL")
                         continue
+                    
+                    logger.debug(f"Result {idx}: {title[:60]}... | URL: {url[:80]}...")
 
-                    product = self._extract_product_data(result, store_name, zipcode)
+                    if not self._is_product_page(url, title):
+                        logger.debug(f"Skipping non-product page: {title[:60]}... (URL: {url[:60]}...)")
+                        # For now, let's be less strict and include results that might be products
+                        # Only skip obvious search/category pages
+                        if any(exclude in url.lower() for exclude in ['/search', '/category', '/browse', '/s/', '/c/']):
+                            logger.debug(f"Definitely skipping search/category page: {url[:60]}...")
+                            continue
+
+                    # Extract product data (skip async image extraction during batch for performance)
+                    product = await self._extract_product_data(result, store_name, zipcode, extract_images_async=False)
+                    
+                    # If no image found and we have a product URL, try async extraction
+                    # This is important because search_and_contents doesn't return image_links
+                    if product and not product.get("image_url") and product.get("product_url"):
+                        try:
+                            logger.debug(f"🖼️ No image found for {product.get('name', 'Unknown')[:50]}, trying async extraction...")
+                            extracted_image = await self.get_product_image_url(product["product_url"])
+                            if extracted_image:
+                                product["image_url"] = extracted_image
+                                logger.info(f"✅ Got image via async extraction for {product.get('name', 'Unknown')[:50]}: {extracted_image[:80]}...")
+                            else:
+                                logger.debug(f"⚠️ Async extraction returned no image for {product.get('product_url', 'Unknown')[:80]}...")
+                        except Exception as e:
+                            logger.debug(f"Failed async image extraction: {e}")
+                    
                     if product:
                         products.append(product)
+                        logger.debug(f"✅ Added product: {product.get('name', 'Unknown')[:50]}...")
+                    else:
+                        logger.debug(f"⚠️ Failed to extract product data from: {title[:50]}...")
                 except Exception as e:
-                    logger.warning(f"⚠️ Failed to process result: {e}")
+                    logger.warning(f"⚠️ Failed to process result {idx}: {e}")
                     continue
 
+            logger.info(f"✅ Processed {len(results)} results, extracted {len(products)} products")
         except Exception as e:
             logger.error(f"❌ Failed to process search results: {e}")
 
@@ -574,11 +643,12 @@ class ExaStructuredClient:
         
         return None
     
-    def _extract_product_data(
+    async def _extract_product_data(
         self,
         result: Any,
         store_name: Optional[str],
-        zipcode: Optional[str]
+        zipcode: Optional[str],
+        extract_images_async: bool = False
     ) -> Optional[Dict[str, Any]]:
         """Extract structured product data from a single result"""
         try:
@@ -637,33 +707,77 @@ class ExaStructuredClient:
                     quantity = match.group(1)
                     break
 
-            # Extract image URLs
+            # Extract image URLs - prioritize Exa-extracted images
             image_url = None
-            if hasattr(result, "image") and result.image:
+            
+            # Priority 1: Check for image_links in extras (Exa-extracted product images)
+            # This is like Exa "right-clicking" the image and copying the URL
+            if hasattr(result, "extras") and result.extras:
+                # Try both snake_case and camelCase for compatibility
+                image_links = getattr(result.extras, "image_links", None) or getattr(result.extras, "imageLinks", None)
+                if image_links and len(image_links) > 0:
+                    image_url = image_links[0]
+                    logger.debug(f"✅ Got image from Exa image_links: {image_url[:80]}...")
+            
+            # Priority 2: Check Exa's image field (may be thumbnail or page image)
+            if not image_url and hasattr(result, "image") and result.image:
                 image_url = result.image
+                logger.debug(f"✅ Using Exa image field: {image_url[:80]}...")
 
-            # Detect store from URL and generate image if possible
+            # Detect store from URL
             detected_store = store_name
             if url:
                 if "target.com" in url:
                     detected_store = "Target"
-                    # Generate Target product image from URL
-                    # Target URLs format: /p/product-name/-/A-12345678
+                    # Fallback: Try to extract Target image URL if Exa didn't provide one
                     if not image_url:
-                        match = re.search(r'/A-(\d+)', url)
-                        if match:
-                            product_id = match.group(1)
-                            # Target Scene7 image CDN format
-                            image_url = f"https://target.scene7.com/is/image/Target/{product_id}?wid=800&hei=800&qlt=80&fmt=webp"
+                        # Try to find GUEST ID pattern in text (Target images often have GUEST IDs in HTML)
+                        guest_match = re.search(r'GUEST_[a-f0-9\-]+', text, re.IGNORECASE)
+                        if guest_match:
+                            guest_id = guest_match.group(0)
+                            image_url = f"https://target.scene7.com/is/image/Target/{guest_id}?wid=1200&hei=1200&qlt=80"
+                        elif extract_images_async:
+                            # Only do async extraction if explicitly requested (not during batch processing)
+                            try:
+                                extracted_image = await self.get_product_image_url(url)
+                                if extracted_image:
+                                    image_url = extracted_image
+                            except Exception as e:
+                                logger.debug(f"Failed to extract Target image: {e}")
                 elif "walmart.com" in url:
                     detected_store = "Walmart"
-                    # Try to extract Walmart product ID and construct image
+                    # Fallback: Try to extract Walmart image URL
                     if not image_url:
-                        match = re.search(r'/ip/[^/]+/(\d+)', url)
-                        if match:
-                            product_id = match.group(1)
-                            # Walmart image CDN format (may not always work)
-                            image_url = f"https://i5.walmartimages.com/asr/{product_id}"
+                        # Try to find Walmart image pattern in text - be more precise
+                        # Match URLs but stop at common delimiters like ), ], }, ", '
+                        walmart_img_patterns = [
+                            # Match full URL with query params, stopping at ) or other delimiters
+                            r'https?://i\d+\.walmartimages\.com/[^\s"\'\)\]\}\s]+\.(?:jpg|jpeg|png|webp|gif)(?:\?[^\s"\'\)\]\}]*)?',
+                            # Match without query params
+                            r'https?://i\d+\.walmartimages\.com/[^\s"\'\)\]\}]+\.(?:jpg|jpeg|png|webp|gif)',
+                        ]
+                        for pattern in walmart_img_patterns:
+                            walmart_img_match = re.search(pattern, text, re.IGNORECASE)
+                            if walmart_img_match:
+                                # Extract the match and clean it up
+                                raw_url = walmart_img_match.group(0)
+                                # Remove trailing punctuation and invalid characters
+                                image_url = raw_url.rstrip('.,;!?)').split(')')[0].split(']')[0].split('}')[0].split('"')[0].split("'")[0]
+                                # Validate it's still a valid URL
+                                if image_url.startswith('http') and '.' in image_url:
+                                    logger.debug(f"✅ Extracted Walmart image from text: {image_url[:80]}...")
+                                    break
+                                else:
+                                    image_url = None
+                        # If still no image, try async extraction
+                        if not image_url and extract_images_async:
+                            try:
+                                extracted_image = await self.get_product_image_url(url)
+                                if extracted_image:
+                                    image_url = extracted_image
+                                    logger.debug(f"✅ Got Walmart image via async extraction: {image_url[:80]}...")
+                            except Exception as e:
+                                logger.debug(f"Failed to extract Walmart image: {e}")
                 elif "wholefoodsmarket.com" in url:
                     detected_store = "Whole Foods"
                 elif "kroger.com" in url:
@@ -704,6 +818,126 @@ class ExaStructuredClient:
             logger.error(f"❌ Failed to extract product data: {e}")
             return None
     
+    async def get_product_image_url(self, product_url: str) -> Optional[str]:
+        """
+        Extract the actual product image URL from a product page using Exa.
+        This is like "right-clicking the image and copying the image URL".
+        
+        Args:
+            product_url: URL of the product page
+            
+        Returns:
+            Direct image URL if found, None otherwise
+        """
+        if not self.is_available() or not product_url:
+            return None
+        
+        try:
+            # Use get_contents to extract image URLs from the product page
+            # This is like "right-clicking the image and copying the image URL"
+            response = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self._client.get_contents(
+                    [product_url],
+                    extras={
+                        "image_links": 1  # Get the main product image URL
+                    }
+                )
+            )
+            
+            if response and response.results:
+                result = response.results[0]
+                
+                # Check for image_links in extras (Exa-extracted product images)
+                if hasattr(result, "extras") and result.extras:
+                    # Try both snake_case and camelCase for compatibility
+                    image_links = getattr(result.extras, "image_links", None) or getattr(result.extras, "imageLinks", None)
+                    if image_links and len(image_links) > 0:
+                        image_url = image_links[0]
+                        logger.info(f"✅ Extracted image URL from {product_url}: {image_url[:80]}...")
+                        return image_url
+                
+                # Fallback: check if Exa returned an image field
+                if hasattr(result, "image") and result.image:
+                    logger.info(f"✅ Using Exa image field: {result.image[:80]}...")
+                    return result.image
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Failed to extract image URL from {product_url}: {e}")
+            return None
+    
+    async def get_product_images_batch(
+        self,
+        product_urls: List[str],
+        max_concurrent: int = 5
+    ) -> Dict[str, Optional[str]]:
+        """
+        Extract product image URLs from multiple product pages concurrently using Exa.
+        More efficient than calling get_product_image_url() multiple times.
+        
+        Args:
+            product_urls: List of product page URLs
+            max_concurrent: Maximum concurrent Exa API calls (default: 5 to respect rate limits)
+            
+        Returns:
+            Dictionary mapping product_url -> image_url (or None if not found)
+        """
+        if not self.is_available() or not product_urls:
+            return {url: None for url in product_urls}
+        
+        results = {}
+        semaphore = asyncio.Semaphore(max_concurrent)
+        
+        async def extract_image(url: str):
+            async with semaphore:
+                try:
+                    image_url = await self.get_product_image_url(url)
+                    # Validate image URL if found
+                    if image_url:
+                        is_valid = await self._validate_image_url(image_url)
+                        if is_valid:
+                            results[url] = image_url
+                        else:
+                            logger.debug(f"⚠️ Exa image URL failed validation: {image_url[:80]}...")
+                            results[url] = None
+                    else:
+                        results[url] = None
+                except Exception as e:
+                    logger.debug(f"Failed to extract image for {url}: {e}")
+                    results[url] = None
+        
+        await asyncio.gather(*[extract_image(url) for url in product_urls])
+        return results
+    
+    async def _validate_image_url(self, image_url: str) -> bool:
+        """
+        Validate that an image URL actually exists and returns a valid image.
+        Uses HTTP HEAD request for efficiency.
+        """
+        if not image_url or not image_url.startswith('http'):
+            return False
+        
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.head(image_url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=5)) as response:
+                    if response.status == 200:
+                        content_type = response.headers.get('Content-Type', '').lower()
+                        # Check if it's an image content type
+                        if content_type.startswith('image/'):
+                            return True
+                        # Some CDNs don't set content-type correctly, check URL extension
+                        if any(ext in image_url.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']):
+                            return True
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Image validation failed for {image_url[:80]}...: {e}")
+            return False
+    
     async def get_product_details(self, url: str) -> Optional[Dict[str, Any]]:
         """
         Get detailed product information from a specific URL
@@ -741,6 +975,9 @@ class ExaStructuredClient:
                 lambda: self._client.get_contents(
                     [url],
                     text=True,
+                    extras={
+                        "image_links": 1  # Also extract image URL
+                    },
                     summary={
                         "query": "Extract comprehensive grocery product details from the product page. Focus on: complete product name and brand, exact price, detailed quantity/size, full description, ingredients list, nutritional facts, allergens, customer ratings and review counts, availability status. Ensure all data is current and accurate from the product page.",
                         "schema": detail_schema
@@ -750,7 +987,8 @@ class ExaStructuredClient:
             
             if response and response.results:
                 result = response.results[0]
-                return self._extract_product_data(result, None, None)
+                # Allow async image extraction for individual product details
+                return await self._extract_product_data(result, None, None, extract_images_async=True)
             
             return None
             
@@ -806,8 +1044,9 @@ class ExaStructuredClient:
         try:
             # Get default city/state from zipcode
             default_city, default_state = self._get_city_state_from_zipcode(zipcode)
-            # Build store location search query
-            search_query = f"{store_chain} store locations near {zipcode}"
+            # Build store location search query - explicitly request full address information
+            # Make it very clear we need complete address details
+            search_query = f"{store_chain} store locations near {zipcode} with complete address details: street number, street name, city, state, zipcode. Find store location pages that show the full physical address like '95 E Houston St, New York, NY 10002'"
             domain = self._get_store_domain(store_chain)
             
             # Define store location schema
@@ -815,7 +1054,7 @@ class ExaStructuredClient:
                 "type": "object",
                 "properties": {
                     "store_name": {"type": "string"},
-                    "address": {"type": "string"},
+                    "address": {"type": "string", "description": "Complete street address with street number and name (e.g., '95 E Houston St')"},
                     "city": {"type": "string"},
                     "state": {"type": "string"},
                     "zipcode": {"type": "string"},
@@ -829,7 +1068,7 @@ class ExaStructuredClient:
                 "query": search_query,
                 "num_results": 10,
                 "type": "keyword",
-                "text": True
+                "text": {"max_characters": 5000}  # Get more text to find address information
             }
 
             if domain:
@@ -844,48 +1083,275 @@ class ExaStructuredClient:
             for result in getattr(response, "results", []):
                 # Extract address info from text content
                 import re
-                text = getattr(result, "text", "")[:2000] if hasattr(result, "text") else ""
+                # Get more text to find address information (increased from 2000 to 5000)
+                text = getattr(result, "text", "")[:5000] if hasattr(result, "text") else ""
                 title = getattr(result, "title", "")
+                url = getattr(result, "url", "")
+                
+                # Log for debugging
+                logger.debug(f"Processing store location result: {title[:80]}... | URL: {url[:80]}...")
 
-                # Try to extract full address from text
+                # Initialize address variables
                 address = None
                 city = None
                 state = None
                 store_zip = zipcode
+                retailer_store_id = None
+                
+                # Try to get structured address data using get_contents if URL is available
+                # This gives us better structured data extraction with explicit prompts
+                if url:
+                    try:
+                        detail_response = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: self._client.get_contents(
+                                [url],
+                                text={"max_characters": 5000},
+                                summary={
+                                    "query": f"Extract the complete store address for this {store_chain} store location. Find the full street address including street number, street name, city, state, and zipcode. Format should be like '95 E Houston St, New York, NY 10002'. Also extract the retailer store ID if available.",
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "address": {"type": "string", "description": "Complete street address with number and name (e.g., '95 E Houston St')"},
+                                            "city": {"type": "string"},
+                                            "state": {"type": "string"},
+                                            "zipcode": {"type": "string"},
+                                            "retailer_store_id": {"type": "string", "description": "Store ID number if available"}
+                                        }
+                                    }
+                                }
+                            )
+                        )
+                        
+                        if detail_response and detail_response.results:
+                            detail_result = detail_response.results[0]
+                            # Get enhanced text from detailed response
+                            detail_text = getattr(detail_result, "text", "")[:5000] if hasattr(detail_result, "text") else ""
+                            if detail_text:
+                                text = detail_text  # Use detailed text for extraction
+                            
+                            # Try to parse structured data from summary if available
+                            if hasattr(detail_result, "summary") and detail_result.summary:
+                                import json
+                                try:
+                                    # Summary might be JSON or structured text
+                                    summary_text = detail_result.summary
+                                    logger.debug(f"Got summary from Exa: {summary_text[:200]}...")
+                                    
+                                    # Try to extract JSON from summary - handle nested objects
+                                    # Look for JSON object with multiple lines
+                                    json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', summary_text, re.DOTALL)
+                                    if json_match:
+                                        try:
+                                            parsed_data = json.loads(json_match.group(0))
+                                            logger.debug(f"Parsed JSON data: {parsed_data}")
+                                            if parsed_data.get("address"):
+                                                address = parsed_data["address"]
+                                                logger.debug(f"✅ Extracted address from summary: {address}")
+                                            if parsed_data.get("city"):
+                                                city = parsed_data["city"]
+                                            if parsed_data.get("state"):
+                                                state = parsed_data["state"]
+                                            if parsed_data.get("zipcode"):
+                                                store_zip = parsed_data["zipcode"]
+                                            if parsed_data.get("retailer_store_id"):
+                                                retailer_store_id = parsed_data["retailer_store_id"]
+                                                logger.debug(f"✅ Extracted retailer_store_id from summary: {retailer_store_id}")
+                                        except json.JSONDecodeError:
+                                            # Try to extract values using regex if JSON parsing fails
+                                            address_match = re.search(r'"address"\s*:\s*"([^"]+)"', summary_text)
+                                            if address_match:
+                                                address = address_match.group(1)
+                                            city_match = re.search(r'"city"\s*:\s*"([^"]+)"', summary_text)
+                                            if city_match:
+                                                city = city_match.group(1)
+                                            state_match = re.search(r'"state"\s*:\s*"([^"]+)"', summary_text)
+                                            if state_match:
+                                                state = state_match.group(1)
+                                            zipcode_match = re.search(r'"zipcode"\s*:\s*"([^"]+)"', summary_text)
+                                            if zipcode_match:
+                                                store_zip = zipcode_match.group(1)
+                                            store_id_match = re.search(r'"retailer_store_id"\s*:\s*"([^"]+)"', summary_text)
+                                            if store_id_match:
+                                                retailer_store_id = store_id_match.group(1)
+                                except Exception as parse_error:
+                                    logger.debug(f"Could not parse summary: {parse_error}")
+                                    # Continue with text extraction
+                    except Exception as e:
+                        logger.debug(f"Failed to get detailed address for {url}: {e}")
 
+                # Extract full address from text (using enhanced text from get_contents if available)
                 # Look for address patterns like "123 Main St, City, ST 12345"
-                address_pattern = r'(\d+\s+[A-Za-z\s]+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Way|Court|Ct|Place|Pl)[.,]?\s*(?:#\d+)?)[,\s]+([A-Za-z\s]+)[,\s]+([A-Z]{2})\s+(\d{5})'
-                match = re.search(address_pattern, text)
-                if match:
-                    address = match.group(1).strip()
-                    city = match.group(2).strip()
-                    state = match.group(3).strip()
-                    store_zip = match.group(4)
-                else:
-                    # Try simpler pattern for city, state
-                    city_state_pattern = r'([A-Za-z\s]+),\s*([A-Z]{2})\s+(\d{5})'
-                    match = re.search(city_state_pattern, text)
+                # Improved pattern to handle various address formats
+                address_patterns = [
+                    # Full address with directional: "95 E Houston St, New York, NY 10002"
+                    r'(\d+\s+[NSEWnsew]\.?\s+[A-Za-z\s]+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Way|Court|Ct|Place|Pl|Parkway|Pkwy)[.,]?)\s*[,\s]+\s*([A-Za-z][A-Za-z\s]+?)\s*,\s*([A-Z]{2})\s+(\d{5})',
+                    # Full address: "123 Main St, City, ST 12345" or "95 E Houston St, New York, NY 10002"
+                    r'(\d+\s+[A-Za-z\s\.]+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Way|Court|Ct|Place|Pl|Parkway|Pkwy)[.,]?)\s*[,\s]+\s*([A-Za-z][A-Za-z\s]+?)\s*,\s*([A-Z]{2})\s+(\d{5})',
+                    # Address with abbreviations: "95 E Houston St, New York, NY 10002"
+                    r'(\d+\s+[A-Za-z\s\.]+(?:St|Ave|Rd|Blvd|Dr|Ln)[.,]?)\s*[,\s]+\s*([A-Za-z][A-Za-z\s]+?)\s*,\s*([A-Z]{2})\s+(\d{5})',
+                    # Address with directional only: "95 E Houston St"
+                    r'(\d+\s+[NSEWnsew]\.?\s+[A-Za-z\s]+(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane)[.,]?)',
+                    # Address without directional: "95 Houston St"
+                    r'(\d+\s+[A-Za-z\s]+(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane)[.,]?)',
+                    # Without full address: "City, ST 12345"
+                    r'([A-Za-z][A-Za-z\s]+?)\s*,\s*([A-Z]{2})\s+(\d{5})',
+                ]
+                
+                for pattern in address_patterns:
+                    match = re.search(pattern, text)
                     if match:
-                        city = match.group(1).strip()
-                        state = match.group(2).strip()
-                        store_zip = match.group(3)
+                        if len(match.groups()) == 4:  # Full address pattern
+                            potential_address = match.group(1).strip()
+                            potential_city = match.group(2).strip()
+                            potential_state = match.group(3).strip()
+                            potential_zip = match.group(4)
+                            
+                            # Only use if it looks like a valid address
+                            if not address and re.match(r'^\d+\s+[A-Za-z]', potential_address):
+                                address = potential_address.rstrip(',. ')  # Clean trailing punctuation
+                            if not city:
+                                city = potential_city
+                            if not state:
+                                state = potential_state
+                            if not store_zip or store_zip == zipcode:
+                                store_zip = potential_zip
+                        elif len(match.groups()) == 3:  # City, state pattern
+                            if not city:
+                                city = match.group(1).strip()
+                            if not state:
+                                state = match.group(2).strip()
+                            if not store_zip or store_zip == zipcode:
+                                store_zip = match.group(3)
+                        elif len(match.groups()) == 1:  # Just address
+                            potential_address = match.group(1).strip()
+                            if not address and re.match(r'^\d+\s+[A-Za-z]', potential_address):
+                                address = potential_address.rstrip(',. ')  # Clean trailing punctuation
+                        break
 
-                # Extract from title if available (e.g., "Target - Chicago")
+                # Extract from title if available (e.g., "Target - Chicago" or "Whole Foods Market Bowery")
                 if not city and " - " in title:
                     parts = title.split(" - ")
                     if len(parts) > 1:
-                        city = parts[1].strip()
+                        location_part = parts[1].strip()
+                        # Clean up location - remove duplicates like "New YorkNew York"
+                        location_part = re.sub(r'([A-Z][a-z]+)\1', r'\1', location_part)
+                        city = location_part
+                
+                # Also check for store name patterns like "Whole Foods Market Bowery" or "Target - Lower East Side"
+                if "Whole Foods" in title or "whole foods" in title.lower():
+                    # Try to extract location from title
+                    title_lower = title.lower()
+                    if "bowery" in title_lower:
+                        city = "New York"
+                        # Try to extract Bowery address (95 E Houston St)
+                        bowery_address = re.search(r'(\d+\s+[Ee]\.?\s+[Hh]ouston\s+[Ss]t)', text, re.IGNORECASE)
+                        if bowery_address:
+                            address = bowery_address.group(1).strip()
+                    elif "east houston" in title_lower or "e houston" in title_lower:
+                        city = "New York"
+                        # Extract street name for address - try multiple patterns
+                        street_patterns = [
+                            r'(\d+\s+[Ee]\.?\s+[Hh]ouston\s+[Ss]t)',  # "95 E Houston St"
+                            r'(\d+\s+[Ee]ast\s+[Hh]ouston\s+[Ss]t)',  # "95 East Houston St"
+                            r'(\d+\s+[Ee]\.?\s+[Hh]ouston)',  # "95 E Houston"
+                        ]
+                        for pattern in street_patterns:
+                            street_match = re.search(pattern, text, re.IGNORECASE)
+                            if street_match:
+                                address = street_match.group(1).strip()
+                                break
+
+                # Clean up city name - remove any street name parts that got mixed in
+                if city:
+                    # Remove common street suffixes if they appear at the start
+                    city = re.sub(r'^(East|West|North|South|Upper|Lower)\s+([A-Za-z]+)\s+(St|Street|Ave|Avenue)', '', city, flags=re.IGNORECASE)
+                    # Remove duplicates like "New YorkNew York" -> "New York"
+                    city = re.sub(r'([A-Z][a-z]+)\1', r'\1', city)
+                    # Remove trailing street names
+                    city = re.sub(r'\s+(St|Street|Ave|Avenue|Rd|Road)\s*$', '', city, flags=re.IGNORECASE)
+                    city = city.strip()
 
                 # Use default city/state if not found
-                if not city:
+                if not city or len(city) < 2:
                     city = default_city
                 if not state:
                     state = default_state
 
+                # Try to extract retailer_store_id from URL or text if not already found
+                if not retailer_store_id and url:
+                    # Whole Foods: look for store ID in URL or text
+                    if "wholefoodsmarket.com" in url:
+                        # Whole Foods URLs might have store IDs
+                        store_id_match = re.search(r'store[_-]?id[=:]?(\d+)', text, re.IGNORECASE)
+                        if store_id_match:
+                            retailer_store_id = store_id_match.group(1)
+                        # Or try to extract from URL
+                        url_match = re.search(r'/stores/(\d+)', url, re.IGNORECASE)
+                        if url_match:
+                            retailer_store_id = url_match.group(1)
+                    
+                    # Target: extract store number
+                    elif "target.com" in url:
+                        store_num_match = re.search(r'store[_-]?(\d+)', text, re.IGNORECASE)
+                        if store_num_match:
+                            retailer_store_id = store_num_match.group(1)
+                    
+                    # Walmart: extract store number
+                    elif "walmart.com" in url:
+                        store_num_match = re.search(r'store[_-]?(\d+)', text, re.IGNORECASE)
+                        if store_num_match:
+                            retailer_store_id = store_num_match.group(1)
+                
+                # Build store name - try to get specific location name
+                location_name = store_chain
+                
+                # Extract location identifier from title (e.g., "Bowery", "Lower East Side", etc.)
+                location_identifier = None
+                
+                # Check for Whole Foods specific patterns
+                if "whole foods" in store_chain.lower() or "wholefoods" in store_chain.lower():
+                    # Look for location identifiers in title
+                    if "bowery" in title.lower():
+                        location_identifier = "Bowery"
+                    elif "east houston" in title.lower():
+                        # Extract street address for name
+                        street_match = re.search(r'(\d+\s+[Ee]ast\s+[Hh]ouston)', text, re.IGNORECASE)
+                        if street_match:
+                            location_identifier = street_match.group(1).strip()
+                        else:
+                            location_identifier = "East Houston"
+                    elif " - " in title:
+                        parts = title.split(" - ")
+                        if len(parts) > 1:
+                            location_identifier = parts[1].strip()
+                            # Clean up location identifier
+                            location_identifier = re.sub(r'New York.*', '', location_identifier, flags=re.IGNORECASE)
+                            location_identifier = location_identifier.strip()
+                
+                # For other stores, extract from title
+                elif " - " in title:
+                    parts = title.split(" - ")
+                    if len(parts) > 1:
+                        location_identifier = parts[1].strip()
+                        # Remove city name if it's duplicated
+                        location_identifier = re.sub(r'\s*New York.*$', '', location_identifier, flags=re.IGNORECASE)
+                        location_identifier = location_identifier.strip()
+                
+                # Build final store name
+                if location_identifier:
+                    location_name = f"{store_chain} {location_identifier}"
+                elif city and city != default_city and city != "New York":
+                    location_name = f"{store_chain} {city}"
+                elif city == "New York" and address:
+                    # Use address for location if we have it
+                    location_name = f"{store_chain} {address}"
+                
                 stores.append({
                     "store_id": store_chain.lower().replace(" ", "_"),
-                    "store_name": store_chain,
-                    "address": address,
+                    "retailer_store_id": retailer_store_id,
+                    "store_name": location_name,
+                    "address": address.rstrip(',. ') if address else None,  # Clean trailing punctuation
                     "city": city,
                     "state": state,
                     "zipcode": store_zip,

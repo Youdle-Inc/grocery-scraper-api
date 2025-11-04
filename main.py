@@ -46,6 +46,7 @@ from scraper.models import (
 )
 from scraper.image_scraper import ImageScraper
 from scraper.ai_scraper import AIScraper
+from scraper.html_image_extractor import HTMLImageExtractor
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -481,6 +482,53 @@ async def search_products(
             context=context
         )
         
+        # Enhance products with missing images using hybrid approach
+        products_needing_images = [
+            (idx, p) for idx, p in enumerate(products)
+            if p.get("product_url") and not p.get("image_url")
+        ]
+        
+        if products_needing_images:
+            logger.info(f"🖼️ Extracting images for {len(products_needing_images)} products missing images...")
+            urls_to_fetch = [p.get("product_url") for _, p in products_needing_images]
+            
+            # Priority 1: Try Exa batch extraction
+            exa_image_results = {}
+            if exa_client.is_available():
+                try:
+                    exa_image_results = await exa_client.get_product_images_batch(
+                        urls_to_fetch,
+                        max_concurrent=5
+                    )
+                    logger.info(f"✅ Exa batch: {sum(1 for v in exa_image_results.values() if v)}/{len(exa_image_results)} images found")
+                except Exception as e:
+                    logger.debug(f"Exa batch extraction failed: {e}")
+            
+            # Priority 2: HTML scraper for remaining
+            remaining_urls = [url for url in urls_to_fetch if url not in exa_image_results or not exa_image_results[url]]
+            html_image_results = {}
+            if remaining_urls:
+                try:
+                    async with HTMLImageExtractor() as html_extractor:
+                        html_image_results = await html_extractor.extract_images_batch(
+                            remaining_urls,
+                            max_concurrent=10
+                        )
+                    logger.info(f"✅ HTML scraper: {sum(1 for v in html_image_results.values() if v)}/{len(html_image_results)} images found")
+                except Exception as e:
+                    logger.debug(f"HTML extraction failed: {e}")
+            
+            # Update products with extracted images
+            for idx, product in products_needing_images:
+                product_url = product.get("product_url")
+                if product_url:
+                    # Try Exa first
+                    if product_url in exa_image_results and exa_image_results[product_url]:
+                        products[idx]["image_url"] = exa_image_results[product_url]
+                    # Then HTML scraper
+                    elif product_url in html_image_results and html_image_results[product_url]:
+                        products[idx]["image_url"] = html_image_results[product_url]
+        
         response_payload = {
             "query": query,
             "store_name": store_name or "All Stores",
@@ -762,9 +810,9 @@ async def aggregate_products(
                     "zipcode": product.get("store_zipcode") or zipcode
                 })
 
-        # Enrich images for better consistency
+        # Hybrid image extraction: Exa batch + HTML scraper fallback
         async def derive_image_from_product_url(product_url: Optional[str], exa_image: Optional[str] = None) -> Optional[str]:
-            """Derive image URL - prefer Exa's image field, fallback to URL derivation"""
+            """Derive image URL from product URL pattern (fallback method with validation)"""
             # Priority 1: Use Exa's image field if available (most reliable)
             if exa_image:
                 return exa_image
@@ -780,12 +828,12 @@ async def aggregate_products(
                         pid = product_url.split("/A-")[1].split("/")[0]
                         # Try multiple Target image formats
                         formats = [
-                            f"https://target.scene7.com/is/image/Target/{pid}",
                             f"https://target.scene7.com/is/image/Target/{pid}?wid=1200&hei=1200&qlt=80&fmt=webp",
-                            f"https://target.scene7.com/is/image/Target/{pid}?wid=800&hei=800&qlt=80&fmt=webp"
+                            f"https://target.scene7.com/is/image/Target/{pid}?wid=800&hei=800&qlt=80&fmt=webp",
+                            f"https://target.scene7.com/is/image/Target/{pid}"
                         ]
-                        # Return first format - will validate later if needed
-                        return formats[1]  # Use webp format
+                        # Return first format (will validate later)
+                        return formats[0]
                     except Exception:
                         pass
                 
@@ -809,77 +857,116 @@ async def aggregate_products(
             except Exception:
                 return None
 
-        # Use shared session for lightweight scraper; use existing exa_client for image lookup
-        async with ImageScraper() as scraper:
-            semaphore_enrich = asyncio.Semaphore(10)
+        # Collect all product URLs that need images
+        urls_needing_images = []
+        url_to_offer_map = {}  # Map product_url -> list of (group_key, offer_index)
+        
+        for group_key, group in grouped.items():
+            for offer_idx, offer in enumerate(group["offers"]):
+                product_url = offer.get("product_url")
+                if product_url and not offer.get("image_url"):
+                    if product_url not in url_to_offer_map:
+                        url_to_offer_map[product_url] = []
+                        urls_needing_images.append(product_url)
+                    url_to_offer_map[product_url].append((group_key, offer_idx))
 
-            async def enrich_group(group: Dict[str, Any]) -> None:
-                async with semaphore_enrich:
-                    canonical = group["canonical_product"]
-                    image_set = set()
+        # PRIORITY 1: Use Exa-provided images (already set from search results)
+        # (Already handled - images from search are already in offers)
 
-                    # PRIORITY 1: Use Exa-provided images first (most reliable)
-                    for offer in group["offers"]:
-                        exa_img = offer.get("image_url")  # Already set from Exa if available
-                        if exa_img:
-                            image_set.add(exa_img)
-                    
-                    # PRIORITY 2: Derive from product URLs if no Exa images
-                    if not image_set:
-                        for offer in group["offers"]:
-                            product_url = offer.get("product_url")
-                            exa_img = offer.get("image_url")  # May have been set from Exa
-                            if product_url:
-                                derived = await derive_image_from_product_url(product_url, exa_img)
-                                if derived:
-                                    image_set.add(derived)
-                                    offer["image_url"] = derived
+        # PRIORITY 2: Batch Exa get_contents for missing images
+        exa_image_results = {}
+        if urls_needing_images and exa_client.is_available():
+            logger.info(f"🖼️ Fetching {len(urls_needing_images)} images via Exa batch extraction...")
+            try:
+                exa_image_results = await exa_client.get_product_images_batch(
+                    urls_needing_images,
+                    max_concurrent=5  # Rate limit Exa API calls
+                )
+                logger.info(f"✅ Exa batch extraction complete: {sum(1 for v in exa_image_results.values() if v)}/{len(exa_image_results)} images found")
+            except Exception as e:
+                logger.warning(f"⚠️ Exa batch image extraction failed: {e}")
 
-                    # PRIORITY 3: Only if still empty, fallback to Exa search (slowest)
-                    if not image_set and exa_client.is_available():
+        # Update offers with Exa images
+        for product_url, image_url in exa_image_results.items():
+            if image_url and product_url in url_to_offer_map:
+                for group_key, offer_idx in url_to_offer_map[product_url]:
+                    grouped[group_key]["offers"][offer_idx]["image_url"] = image_url
+
+        # PRIORITY 3: HTML scraper for remaining missing images
+        remaining_urls = [url for url in urls_needing_images if url not in exa_image_results or not exa_image_results[url]]
+        html_image_results = {}
+        if remaining_urls:
+            logger.info(f"🖼️ Fetching {len(remaining_urls)} images via HTML scraper...")
+            try:
+                async with HTMLImageExtractor() as html_extractor:
+                    html_image_results = await html_extractor.extract_images_batch(
+                        remaining_urls,
+                        max_concurrent=10  # Can do more concurrent requests with direct HTML scraping
+                    )
+                logger.info(f"✅ HTML scraper complete: {sum(1 for v in html_image_results.values() if v)}/{len(html_image_results)} images found")
+            except Exception as e:
+                logger.warning(f"⚠️ HTML image extraction failed: {e}")
+
+        # Update offers with HTML scraper images
+        for product_url, image_url in html_image_results.items():
+            if image_url and product_url in url_to_offer_map:
+                for group_key, offer_idx in url_to_offer_map[product_url]:
+                    grouped[group_key]["offers"][offer_idx]["image_url"] = image_url
+
+        # PRIORITY 4: URL pattern matching with validation (last resort)
+        remaining_urls = [url for url in remaining_urls if url not in html_image_results or not html_image_results[url]]
+        if remaining_urls:
+            logger.info(f"🖼️ Trying URL pattern matching for {len(remaining_urls)} products...")
+            # Use aiohttp for validation
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async def validate_derived_image(url: str) -> Optional[str]:
+                    derived = await derive_image_from_product_url(url)
+                    if derived:
+                        # Validate the derived URL
                         try:
-                            exa_query = " ".join([
-                                p for p in [canonical.get("brand"), canonical.get("name"), canonical.get("quantity")] if p
-                            ]) or (canonical.get("name") or "")
-                            exa_results = await exa_client.search_products_structured(
-                                query=exa_query,
-                                store_name=None,
-                                zipcode=None,
-                                num_results=5,
-                                include_location=False,
-                            )
-                            for r in exa_results:
-                                if r.get("image_url"):
-                                    image_set.add(r["image_url"])
-                                    break
-                                for ai in r.get("additional_images", []) or []:
-                                    image_set.add(ai)
-                                    break
+                            async with session.head(derived, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=5)) as response:
+                                if response.status == 200:
+                                    content_type = response.headers.get('Content-Type', '').lower()
+                                    if content_type.startswith('image/') or any(ext in derived.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']):
+                                        return derived
                         except Exception:
                             pass
+                    return None
+                
+                semaphore = asyncio.Semaphore(10)
+                async def process_url(url: str):
+                    async with semaphore:
+                        validated = await validate_derived_image(url)
+                        if validated and url in url_to_offer_map:
+                            for group_key, offer_idx in url_to_offer_map[url]:
+                                grouped[group_key]["offers"][offer_idx]["image_url"] = validated
+                
+                await asyncio.gather(*[process_url(url) for url in remaining_urls])
 
-                    # PRIORITY 4: Last resort - lightweight scraper
-                    if not image_set:
-                        img = await scraper.find_product_image(
-                            canonical.get("name") or "",
-                            canonical.get("brand") or None,
-                            None,
-                        )
-                        if img:
-                            image_set.add(img)
+        # Final enrichment: collect all images and update canonical products
+        async def enrich_group_final(group: Dict[str, Any]) -> None:
+            canonical = group["canonical_product"]
+            image_set = set()
 
-                    # Update canonical images
-                    canonical["images"] = list(image_set) if image_set else []
+            # Collect all images from offers
+            for offer in group["offers"]:
+                img_url = offer.get("image_url")
+                if img_url:
+                    image_set.add(img_url)
 
-                    # Backfill any remaining missing offer image_urls
-                    if canonical["images"]:
-                        primary = canonical["images"][0]
-                        for offer in group["offers"]:
-                            if not offer.get("image_url"):
-                                offer["image_url"] = primary
+            # Update canonical images
+            canonical["images"] = list(image_set) if image_set else []
 
-            # Enrich all groups concurrently
-            await asyncio.gather(*(enrich_group(g) for g in grouped.values()))
+            # Backfill any remaining missing offer image_urls with primary image
+            if canonical["images"]:
+                primary = canonical["images"][0]
+                for offer in group["offers"]:
+                    if not offer.get("image_url"):
+                        offer["image_url"] = primary
+
+        # Final enrichment pass
+        await asyncio.gather(*(enrich_group_final(g) for g in grouped.values()))
 
         # Optional: Enhance descriptions with AI if they're missing or too basic
         if ai_scraper.is_available() and refresh:
@@ -955,8 +1042,29 @@ async def aggregate_products(
             except Exception as e:
                 logger.warning(f"AI scraper enrichment failed: {e}")
 
+        # Fetch store locations for all retailers
+        logger.info(f"🔍 Fetching store locations for {len(considered_store_ids)} retailers")
+        store_locations_cache = {}
+        
+        async def fetch_store_locations(store_id: str):
+            """Fetch store locations for a retailer"""
+            try:
+                store_name = to_store_name(store_id)
+                stores = await exa_client.search_stores_in_zipcode(store_name, zipcode)
+                if stores:
+                    # Use the first store found (closest match)
+                    store_locations_cache[store_id] = stores[0]
+                    logger.debug(f"✅ Found store location for {store_name}: {stores[0].get('store_name', 'Unknown')}")
+                else:
+                    logger.debug(f"⚠️ No store location found for {store_name} near {zipcode}")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to fetch store location for {store_id}: {e}")
+        
+        # Fetch store locations concurrently
+        await asyncio.gather(*[fetch_store_locations(sid) for sid in considered_store_ids], return_exceptions=True)
+        
         # Transform to enhanced format
-        async def transform_to_enhanced_format(grouped_results: Dict[str, Any], stores_considered: List[str], query: str, zipcode: str) -> Dict[str, Any]:
+        async def transform_to_enhanced_format(grouped_results: Dict[str, Any], stores_considered: List[str], query: str, zipcode: str, store_locations: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
             """Transform grouped results to enhanced response format"""
             from datetime import datetime
             
@@ -1041,15 +1149,36 @@ async def aggregate_products(
                             regular_price = float(price)
                             # Assume no sale price for now
                     
+                    # Get store location details from cache
+                    store_location = store_locations.get(store_id, {})
+                    
+                    # Extract retailer_store_id from store location
+                    retailer_store_id = None
+                    if store_location:
+                        # Try to get retailer_store_id from location data (this is the actual store ID)
+                        retailer_store_id = store_location.get("retailer_store_id")
+                        # If not found, try store_id (but this is usually the retailer name, not store ID)
+                        if not retailer_store_id and store_location.get("store_id") and store_location.get("store_id") != store_id:
+                            retailer_store_id = store_location.get("store_id")
+                    
+                    # Use store location data if available, otherwise fall back to offer data
+                    store_address = store_location.get("address") or offer.get("address")
+                    store_city = store_location.get("city") or offer.get("city")
+                    store_state = store_location.get("state") or offer.get("state")
+                    store_zipcode = store_location.get("zipcode") or offer.get("zipcode") or zipcode
+                    
+                    # Get full store name from location if available
+                    full_store_name = store_location.get("store_name") or store_name
+                    
                     # Create store info
                     store_info = StoreInfoDetailed(
                         retailer=store_id,
-                        retailer_store_id=retailer_sku if store_id == store_name.lower().replace(" ", "_") else None,
-                        store_name=store_name,
-                        address=offer.get("address"),
-                        city=offer.get("city"),
-                        state=offer.get("state"),
-                        zipcode=offer.get("zipcode") or zipcode
+                        retailer_store_id=retailer_store_id,
+                        store_name=full_store_name,
+                        address=store_address,
+                        city=store_city,
+                        state=store_state,
+                        zipcode=store_zipcode
                     )
                     
                     enhanced_offer_dict = {
@@ -1104,7 +1233,7 @@ async def aggregate_products(
             "source": "exa_structured_aggregate"
         }
         
-        enhanced_response = await transform_to_enhanced_format(grouped, considered_store_ids, query, zipcode)
+        enhanced_response = await transform_to_enhanced_format(grouped, considered_store_ids, query, zipcode, store_locations_cache)
 
         # Cache the results (store standard format)
         logger.info(f"cache_miss aggregate zip={zipcode} q='{query}' -> setting cache")
