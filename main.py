@@ -671,20 +671,25 @@ async def aggregate_products(
         default_stores = ["target", "walmart", "whole_foods", "kroger", "aldi"]
         considered_store_ids = user_store_ids[:10] if user_store_ids else default_stores
 
-        # Cache lookup
-        cache_key = f"aggregate:{zipcode}:{query}:{':'.join(sorted(considered_store_ids))}"
-        cached = None if refresh else await cache.get_json(cache_key)
-        if cached and not refresh:
-            logger.info(f"cache_hit aggregate zip={zipcode} q='{query}'")
-            return {**cached, "cache": {"hit": True}}
+        # Helper functions for data normalization (needed for cache transformation)
+        def norm_text(s: Optional[str]) -> str:
+            return (s or "").lower().strip()
 
-        if not exa_client.is_available():
-            raise HTTPException(
-                status_code=503,
-                detail="Exa client not available - check API key configuration"
-            )
+        def norm_name(name: Optional[str]) -> str:
+            n = norm_text(name)
+            for token in ["brand", "original", "the"]:
+                n = n.replace(f" {token} ", " ")
+            n = n.replace("-", " ")
+            return " ".join(n.split())
 
-        # Map canonical store_id to human-friendly name
+        def norm_quantity(qty: Optional[str]) -> str:
+            q = norm_text(qty)
+            q = q.replace("fluid ounces", "fl oz").replace("fluid ounce", "fl oz")
+            q = q.replace("ounces", "oz").replace("ounce", "oz")
+            q = q.replace("fl. oz", "fl oz").replace("fl-oz", "fl oz")
+            q = q.replace("packs", "pack").replace(" ct", " count")
+            return " ".join(q.split())
+
         def to_store_name(store_id: str) -> str:
             mapping = {
                 "whole_foods": "Whole Foods",
@@ -698,6 +703,63 @@ async def aggregate_products(
                 "safeway": "Safeway",
             }
             return mapping.get(store_id, store_id.replace("_", " ").title())
+
+        # Cache lookup
+        cache_key = f"aggregate:{zipcode}:{query}:{':'.join(sorted(considered_store_ids))}"
+        cached = None if refresh else await cache.get_json(cache_key)
+        if cached and not refresh:
+            logger.info(f"cache_hit aggregate zip={zipcode} q='{query}'")
+            # Check if cached data is in enhanced format (has search_timestamp and meta)
+            if cached.get("search_timestamp") and cached.get("meta"):
+                # Already in enhanced format, just update cache hit status
+                cached["meta"]["cache"] = {"hit": True}
+                return cached
+            else:
+                # Old standard format cached, need to transform it
+                logger.info("Transforming cached standard format to enhanced format")
+                # Rebuild grouped structure from cached standard format
+                grouped_from_cache = {}
+                for result in cached.get("results", []):
+                    canonical = result.get("canonical_product", {})
+                    offers = result.get("offers", [])
+                    # Create grouping key
+                    brand = norm_text(canonical.get("brand"))
+                    name = norm_name(canonical.get("name"))
+                    quantity = norm_quantity(canonical.get("quantity") or canonical.get("size"))
+                    gkey = f"{brand}|{name}|{quantity}"
+                    grouped_from_cache[gkey] = {
+                        "canonical_product": canonical,
+                        "offers": offers
+                    }
+                # Fetch store locations for transformation
+                store_locations_cache = {}
+                async def fetch_store_locations(store_id: str):
+                    try:
+                        store_name = to_store_name(store_id)
+                        stores = await exa_client.search_stores_in_zipcode(store_name, zipcode)
+                        if stores:
+                            store_locations_cache[store_id] = stores[0]
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to fetch store location for {store_id}: {e}")
+                
+                await asyncio.gather(*[fetch_store_locations(sid) for sid in considered_store_ids], return_exceptions=True)
+                
+                # Transform to enhanced format
+                enhanced_cached = await transform_to_enhanced_format(
+                    grouped_from_cache, 
+                    considered_store_ids, 
+                    query, 
+                    zipcode, 
+                    store_locations_cache
+                )
+                enhanced_cached["meta"]["cache"] = {"hit": True}
+                return enhanced_cached
+
+        if not exa_client.is_available():
+            raise HTTPException(
+                status_code=503,
+                detail="Exa client not available - check API key configuration"
+            )
 
         # Search products across all stores concurrently
         semaphore = asyncio.Semaphore(5)  # Limit concurrent searches
@@ -735,24 +797,6 @@ async def aggregate_products(
         store_results = await asyncio.gather(*tasks, return_exceptions=False)
 
         # Aggregate products by canonical product
-        def norm_text(s: Optional[str]) -> str:
-            return (s or "").lower().strip()
-
-        def norm_name(name: Optional[str]) -> str:
-            n = norm_text(name)
-            for token in ["brand", "original", "the"]:
-                n = n.replace(f" {token} ", " ")
-            n = n.replace("-", " ")
-            return " ".join(n.split())
-
-        def norm_quantity(qty: Optional[str]) -> str:
-            q = norm_text(qty)
-            q = q.replace("fluid ounces", "fl oz").replace("fluid ounce", "fl oz")
-            q = q.replace("ounces", "oz").replace("ounce", "oz")
-            q = q.replace("fl. oz", "fl oz").replace("fl-oz", "fl oz")
-            q = q.replace("packs", "pack").replace(" ct", " count")
-            return " ".join(q.split())
-
         grouped = {}
         for result in store_results:
             store_id = result["store_id"]
@@ -1235,9 +1279,9 @@ async def aggregate_products(
         
         enhanced_response = await transform_to_enhanced_format(grouped, considered_store_ids, query, zipcode, store_locations_cache)
 
-        # Cache the results (store standard format)
+        # Cache the results (store enhanced format for future use)
         logger.info(f"cache_miss aggregate zip={zipcode} q='{query}' -> setting cache")
-        await cache.set_json(cache_key, standard_response, ttl_seconds=60 * 15)
+        await cache.set_json(cache_key, enhanced_response, ttl_seconds=60 * 15)
         
         # Return enhanced format
         return enhanced_response
