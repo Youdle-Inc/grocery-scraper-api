@@ -136,6 +136,18 @@ class ExaStructuredClient:
                 base_query = f"{query} grocery product"
             else:
                 base_query = f"{query} grocery"
+        
+        # Add location information if zipcode is provided
+        if zipcode:
+            # Get city/state from zipcode for better location context
+            city, state = self._get_city_state_from_zipcode(zipcode)
+            if city and state:
+                # Use city, state, and zipcode for best location filtering
+                base_query = f"{base_query} near {city} {state} zipcode {zipcode}"
+            else:
+                # For unknown zipcodes, use explicit zipcode location filtering
+                # Exa understands zipcodes well, so this should still work effectively
+                base_query = f"{base_query} location zipcode {zipcode} in {zipcode}"
 
         return base_query
     
@@ -1021,6 +1033,16 @@ class ExaStructuredClient:
             "60660": ("Chicago", "IL"), "60661": ("Chicago", "IL"),
             "10001": ("New York", "NY"), "10002": ("New York", "NY"), "10003": ("New York", "NY"),
             "10004": ("New York", "NY"), "10005": ("New York", "NY"),
+            "38125": ("Memphis", "TN"), "38103": ("Memphis", "TN"), "38104": ("Memphis", "TN"),
+            "38105": ("Memphis", "TN"), "38106": ("Memphis", "TN"), "38107": ("Memphis", "TN"),
+            "38108": ("Memphis", "TN"), "38109": ("Memphis", "TN"), "38111": ("Memphis", "TN"),
+            "38112": ("Memphis", "TN"), "38113": ("Memphis", "TN"), "38114": ("Memphis", "TN"),
+            "38115": ("Memphis", "TN"), "38116": ("Memphis", "TN"), "38117": ("Memphis", "TN"),
+            "38118": ("Memphis", "TN"), "38119": ("Memphis", "TN"), "38120": ("Memphis", "TN"),
+            "38122": ("Memphis", "TN"), "38126": ("Memphis", "TN"), "38127": ("Memphis", "TN"),
+            "38128": ("Memphis", "TN"), "38130": ("Memphis", "TN"), "38131": ("Memphis", "TN"),
+            "38132": ("Memphis", "TN"), "38133": ("Memphis", "TN"), "38134": ("Memphis", "TN"),
+            "38135": ("Memphis", "TN"), "38138": ("Memphis", "TN"), "38139": ("Memphis", "TN"),
             "90001": ("Los Angeles", "CA"), "90002": ("Los Angeles", "CA"),
             "94102": ("San Francisco", "CA"), "94103": ("San Francisco", "CA"),
             "02108": ("Boston", "MA"), "02109": ("Boston", "MA"),
@@ -1046,7 +1068,10 @@ class ExaStructuredClient:
             default_city, default_state = self._get_city_state_from_zipcode(zipcode)
             # Build store location search query - explicitly request full address information
             # Make it very clear we need complete address details
-            search_query = f"{store_chain} store locations near {zipcode} with complete address details: street number, street name, city, state, zipcode. Find store location pages that show the full physical address like '95 E Houston St, New York, NY 10002'"
+            if default_city and default_state:
+                search_query = f"{store_chain} store locations in {default_city} {default_state} zipcode {zipcode} with complete address details: street number, street name, city, state, zipcode. Find store location pages that show the full physical address near {zipcode}"
+            else:
+                search_query = f"{store_chain} store locations in zipcode {zipcode} area with complete address details: street number, street name, city, state, zipcode. Find store location pages that show the full physical address near zipcode {zipcode}"
             domain = self._get_store_domain(store_chain)
             
             # Define store location schema
