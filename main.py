@@ -91,24 +91,28 @@ app = FastAPI(
 
     ### ✨ Features
     - **Real Product URLs**: Direct links to Target, Walmart, and other major stores
-    - **High-Quality Images**: 800x800 product images from store CDNs
+    - **High-Quality Images**: 800x800+ product images from store CDNs
     - **Smart Search**: AI-powered semantic search with Exa API
-    - **Multi-Store Comparison**: Compare products across different retailers
-    - **Location-Based**: Search by ZIP code for local availability
+    - **Multi-Store Comparison**: Compare products across different retailers in one request
+    - **Universal Location Filtering**: Works with any ZIP code for accurate location-based results
+    - **Flexible Result Limits**: Control number of products returned (default: 50, max: 100)
 
     ### 🏬 Supported Stores
     Target • Walmart • Whole Foods • Kroger • Safeway • ALDI • Costco • Trader Joe's
 
     ### 🚀 Quick Start
     1. Try the `/health` endpoint to verify the API is running
-    2. Use `/stores/{zipcode}` to find stores in your area
-    3. Search products with `/products/search?query=milk&store_name=Target&zipcode=60601`
-    4. Compare prices with `/products/aggregate?query=eggs&zipcode=60601`
+    2. Use `/stores/{zipcode}` to find stores in your area (works with any ZIP code)
+    3. Search products with `/products/search?query=milk&store_name=Target&zipcode=38125`
+    4. Compare prices with `/products/aggregate?query=eggs&zipcode=38125&limit=10`
 
     ### 📊 Response Format
     All responses include `product_url` and `image_url` for easy web app integration.
+    
+    ### 🌍 Location Support
+    The API works with any valid 5-digit US ZIP code. Location filtering is automatic and ensures products and stores match the requested location.
     """,
-    version="2.0.0",
+    version="2.1.0",
     docs_url="/swagger",  # Swagger UI at /swagger for interactive testing
     redoc_url=None,       # We'll mount ReDoc at root manually
     contact={
@@ -186,7 +190,7 @@ async def api_info():
     """API information endpoint (JSON)"""
     return {
         "name": "Grocery Scraper API",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "description": "AI-powered grocery product discovery with Exa - structured data with real URLs and images",
         "endpoints": {
             "health": "/health",
@@ -196,9 +200,12 @@ async def api_info():
         },
         "features": [
             "Exa-powered structured product search",
-            "Real product URLs and high-quality images",
-            "Store location discovery",
+            "Real product URLs and high-quality images (800x800+)",
+            "Store location discovery (works with any ZIP code)",
             "Smart product matching across multiple stores",
+            "Multi-store price comparison",
+            "Universal location filtering",
+            "Flexible result limits",
             "Structured data extraction (price, quantity, address, etc.)"
         ],
         "data_fields": [
@@ -210,7 +217,9 @@ async def api_info():
             "store_name",
             "store_address",
             "store_zipcode",
-            "availability"
+            "availability",
+            "fulfillment_options",
+            "category_path"
         ]
     }
 
