@@ -101,6 +101,11 @@ app = FastAPI(
     - **Multi-Store Comparison**: Compare products across different retailers in one request
     - **Universal Location Filtering**: Works with any ZIP code for accurate location-based results
     - **Flexible Result Limits**: Control number of products returned (default: 50, max: 100)
+    - **AI Product Validation**: Automatically filters out generic/placeholder products and validates real prices
+    - **Perplexity-Style Insights**: Overview summaries and follow-up query suggestions
+    - **Real-Time Streaming**: Get results as they come in with Server-Sent Events
+    - **Enhanced Availability Detection**: Accurate stock status (IN_STOCK, OUT_OF_STOCK, LOW_STOCK)
+    - **28+ Supported Stores**: Comprehensive store coverage
 
     ### 🏬 Supported Stores
     Target • Walmart • Whole Foods • Kroger • Safeway • ALDI • Costco • Trader Joe's
@@ -117,7 +122,7 @@ app = FastAPI(
     ### 🌍 Location Support
     The API works with any valid 5-digit US ZIP code. Location filtering is automatic and ensures products and stores match the requested location.
     """,
-    version="2.1.0",
+    version="3.0.0",
     docs_url="/swagger",  # Swagger UI at /swagger for interactive testing
     redoc_url=None,       # We'll mount ReDoc at root manually
     contact={
@@ -199,13 +204,14 @@ async def api_info():
     """API information endpoint (JSON)"""
     return {
         "name": "Grocery Scraper API",
-        "version": "2.1.0",
-        "description": "AI-powered grocery product discovery with Exa - structured data with real URLs and images",
+        "version": "3.0.0",
+        "description": "AI-powered grocery product discovery with Exa - structured data with real URLs, images, and AI validation",
         "endpoints": {
             "health": "/health",
             "stores": "/stores/{zipcode}",
             "products": "/products/search",
-            "aggregate": "/products/aggregate"
+            "aggregate": "/products/aggregate",
+            "aggregate_stream": "/products/aggregate/stream"
         },
         "features": [
             "Exa-powered structured product search",
@@ -215,6 +221,11 @@ async def api_info():
             "Multi-store price comparison",
             "Universal location filtering",
             "Flexible result limits",
+            "AI product validation (filters generic/placeholder products)",
+            "Perplexity-style insights (overview summaries and follow-up queries)",
+            "Real-time streaming API (Server-Sent Events)",
+            "Enhanced availability detection",
+            "28+ supported stores",
             "Structured data extraction (price, quantity, address, etc.)"
         ],
         "data_fields": [
@@ -228,7 +239,9 @@ async def api_info():
             "store_zipcode",
             "availability",
             "fulfillment_options",
-            "category_path"
+            "category_path",
+            "overview",
+            "follow_up_queries"
         ]
     }
 
