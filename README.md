@@ -80,6 +80,9 @@ Create a `.env` file in the project root:
 ```bash
 # Required: Exa API Key (for real product URLs and images)
 EXA_API_KEY=your_exa_api_key_here
+
+# Optional: OpenAI API Key (for AI product validation)
+OPENAI_API_KEY=your_openai_api_key_here
 ```
 
 ### 3. Run the API
@@ -287,6 +290,7 @@ curl -N "http://localhost:8000/products/aggregate/stream?query=eggs&zipcode=3812
 | Variable | Description | Required | Example |
 |----------|-------------|----------|---------|
 | `EXA_API_KEY` | Exa API key | ✅ | `exa-abc123...` |
+| `OPENAI_API_KEY` | OpenAI API key (for AI product validation) | ⚠️ Optional | `sk-proj-...` |
 
 ### API Response Fields
 
@@ -345,10 +349,11 @@ grocery-scraper-api/
 - Parses AI-generated product information
 - Manages store discovery and product search
 
-#### ExaClient (`scraper/exa_client.py`)
-- Integrates with Exa API for web search data
-- Provides real product URLs and images
-- Matches products by name similarity
+#### ProductValidator (`scraper/product_validator.py`)
+- AI-powered product data quality validation
+- Filters out generic/placeholder products
+- Validates product specificity, price authenticity, and URL validity
+- Uses OpenAI GPT-4o-mini for intelligent validation (falls back to basic validation if API key not available)
 
 ### Testing
 ```bash
@@ -358,6 +363,38 @@ python test_sonar.py
 # Test Exa API integration
 python test_exa_integration.py
 ```
+
+## 🔍 Product Validation
+
+The API includes **AI-powered product validation** to ensure only real, specific products with actual prices are returned.
+
+### What Gets Validated
+
+1. **Product Specificity**: Checks if the product name is specific (e.g., "Grade A Large Eggs - 12ct") vs generic (e.g., "Whole Foods" or "Eggs")
+2. **Price Authenticity**: Validates prices are real and specific to the product, not placeholder/aggregate prices
+3. **URL Validity**: Ensures product URLs point to specific product pages, not category pages or store homepages
+4. **Image Specificity**: Verifies images are product-specific, not generic store images
+5. **Query Matching**: Confirms products match the original search query
+
+### How It Works
+
+- Uses OpenAI GPT-4o-mini to intelligently analyze product data
+- Filters out products with confidence scores below 0.6
+- Removes invalid offers (missing URLs, placeholder prices)
+- Falls back to basic pattern matching if OpenAI API key is not available
+- Logs validation statistics showing how many products were filtered
+
+### Example
+
+**Before Validation:**
+- Generic product: "Whole Foods" with placeholder price "$8.99"
+- Generic store image (produce section)
+- No specific product URL
+
+**After Validation:**
+- Specific product: "Grade A Large Eggs - 12ct" with real price "$4.99"
+- Product-specific image
+- Valid product URL pointing to actual product page
 
 ## 🔍 How It Works
 
@@ -381,7 +418,8 @@ python test_exa_integration.py
 3. **Location Filtering**: Each search includes location context for accurate results
 4. **Product Grouping**: Groups identical products together
 5. **Store Matching**: Matches products to stores in the requested location
-6. **Response**: Returns grouped products with offers from multiple stores
+6. **AI Validation**: Validates products are real (not generic placeholders) with actual prices
+7. **Response**: Returns grouped products with offers from multiple stores
 
 ## 🎯 Use Cases
 
