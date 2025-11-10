@@ -275,3 +275,5 @@ class AggregateResponseEnhanced(BaseModel):
     results: List[ProductResultEnhanced]
     stores_considered: List[str]
     meta: Dict[str, Any]
+    overview: Optional[str] = None
+    follow_up_queries: Optional[List[str]] = None

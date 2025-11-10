@@ -39,6 +39,8 @@ See [TEST_CURL_COMMANDS.md](./TEST_CURL_COMMANDS.md) for comprehensive examples.
 - **Store-Specific Results**: Filter by Target, Walmart, Safeway, and more
 - **Multi-Store Comparison**: Compare products across multiple retailers in one request
 - **Location-Based Filtering**: Works with any ZIP code for accurate location-based results
+- **Perplexity-Style Insights**: Overview summaries and follow-up query suggestions
+- **Real-Time Streaming**: Get results as they come in with Server-Sent Events
 
 ### 🚀 Performance & Reliability
 - **Fast Response Times**: Optimized for quick product searches
@@ -202,6 +204,7 @@ Compare the same products across multiple stores to find the best deals.
 - `zipcode` (required): 5-digit ZIP code for location-based results
 - `limit` (optional): Maximum number of products to return (default: 50, max: 100)
 - `stores` (optional): Comma-separated store IDs (e.g., "target,walmart")
+- `all_stores` (optional): Search all 28 supported stores instead of default top 5 (default: false)
 - `radius_miles` (optional): Search radius in miles (default: 10, max: 50)
 - `refresh` (optional): Bypass cache (default: false)
 
@@ -215,6 +218,12 @@ curl "http://localhost:8000/products/aggregate?query=eggs&zipcode=38125&limit=10
 
 # Compare specific stores only
 curl "http://localhost:8000/products/aggregate?query=milk&zipcode=38125&stores=target,walmart"
+
+# Search all 28 supported stores
+curl "http://localhost:8000/products/aggregate?query=eggs&zipcode=38125&all_stores=true"
+
+# Stream results in real-time (for web apps)
+curl -N "http://localhost:8000/products/aggregate/stream?query=eggs&zipcode=38125&stores=target,walmart"
 ```
 
 **Example Response:**
@@ -254,6 +263,15 @@ curl "http://localhost:8000/products/aggregate?query=milk&zipcode=38125&stores=t
     }
   ],
   "stores_considered": ["target", "walmart", "whole_foods", "kroger", "aldi"],
+  "overview": "Found 10 products for 'eggs' across 5 stores ranging from $3.99 to $5.99 including brands like Target, Walmart in categories: Dairy & Eggs, Eggs near 38125.",
+  "follow_up_queries": [
+    "milk",
+    "butter",
+    "Target eggs",
+    "organic eggs",
+    "cheapest eggs",
+    "best deals on eggs"
+  ],
   "meta": {
     "api_version": "2.1.0",
     "cache": {"hit": false}
@@ -296,11 +314,13 @@ curl "http://localhost:8000/products/aggregate?query=milk&zipcode=38125&stores=t
   - `images`: Array of product images with `url` and `is_primary` flag
   - `offers`: Array of offers from different stores
     - `store`: Store information (retailer, store_name, address, city, state, zipcode)
-    - `product_url`: Direct link to product page
+    - `product_url`: Direct link to product page (includes location parameters)
     - `regular_price`: Regular price
     - `sale_price`: Sale price (if on sale)
     - `fulfillment`: Array of fulfillment options (PICKUP, DELIVERY, IN_STORE)
-    - `availability`: Stock availability status
+    - `availability`: Stock availability status (IN_STOCK, OUT_OF_STOCK, LOW_STOCK, CHECK_STORE)
+- `overview`: Natural language summary of search results (Perplexity-style)
+- `follow_up_queries`: Suggested related searches (array of query strings)
 
 ## 🛠️ Development
 
@@ -387,6 +407,15 @@ python test_exa_integration.py
 - **Error Sanitization**: Safe error messages without sensitive data
 
 ## ✨ Recent Updates
+
+### Version 3.0.0
+- ✅ **Perplexity-Style Insights**: Overview summaries and follow-up query suggestions
+- ✅ **Streaming API**: Real-time results via Server-Sent Events (`/products/aggregate/stream`)
+- ✅ **Enhanced Availability Detection**: Accurate stock status (IN_STOCK, OUT_OF_STOCK, LOW_STOCK)
+- ✅ **URL Location Enhancement**: Product URLs include zipcode parameters for location-specific pricing
+- ✅ **All Stores Parameter**: Option to search all 28 stores with `all_stores=true`
+- ✅ **Universal Search**: AI-powered query understanding and multi-strategy search
+- ✅ **28+ Supported Stores**: Comprehensive store coverage
 
 ### Version 2.1.0
 - ✅ **Universal Location Filtering**: Works with any ZIP code, not just hardcoded locations

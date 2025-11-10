@@ -50,6 +50,7 @@ from scraper.html_image_extractor import HTMLImageExtractor
 from scraper.universal_search import UniversalGrocerySearch
 from scraper.availability_checker import AvailabilityChecker
 from scraper.url_location_enhancer import URLLocationEnhancer
+from scraper.search_insights import SearchInsightsGenerator
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -164,6 +165,9 @@ exa_client = ExaStructuredClient()
 location_service = LocationService()
 ai_scraper = AIScraper()  # AI-powered scraper for direct price extraction
 cache = Cache()
+universal_search = UniversalGrocerySearch(exa_client)  # Universal search service
+availability_checker = AvailabilityChecker(exa_client)  # Availability checker
+search_insights = SearchInsightsGenerator()  # Search insights generator
 
 # Debug: Check client status
 logger.info(f"🔍 ExaStructuredClient initialized: {exa_client.is_available()}")
@@ -749,6 +753,23 @@ async def aggregate_products(
                 cached["meta"]["cache"] = {"hit": True}
                 if limit and len(cached.get("results", [])) > limit:
                     cached["results"] = cached["results"][:limit]
+                
+                # Ensure insights are present (regenerate if missing)
+                if not cached.get("overview"):
+                    cached["overview"] = search_insights.generate_overview(
+                        query=query,
+                        results=cached.get("results", []),
+                        stores_considered=considered_store_ids,
+                        zipcode=zipcode
+                    )
+                
+                if not cached.get("follow_up_queries"):
+                    cached["follow_up_queries"] = search_insights.generate_follow_up_queries(
+                        query=query,
+                        results=cached.get("results", []),
+                        stores_considered=considered_store_ids
+                    )
+                
                 return cached
             else:
                 # Old standard format cached, need to transform it
@@ -1321,6 +1342,22 @@ async def aggregate_products(
         # Apply limit to results
         if limit and len(enhanced_response.get("results", [])) > limit:
             enhanced_response["results"] = enhanced_response["results"][:limit]
+        
+        # Generate insights for the final response (if not already present)
+        if not enhanced_response.get("overview"):
+            enhanced_response["overview"] = search_insights.generate_overview(
+                query=query,
+                results=enhanced_response.get("results", []),
+                stores_considered=considered_store_ids,
+                zipcode=zipcode
+            )
+        
+        if not enhanced_response.get("follow_up_queries"):
+            enhanced_response["follow_up_queries"] = search_insights.generate_follow_up_queries(
+                query=query,
+                results=enhanced_response.get("results", []),
+                stores_considered=considered_store_ids
+            )
 
         # Cache the results (store enhanced format for future use)
         logger.info(f"cache_miss aggregate zip={zipcode} q='{query}' -> setting cache")
