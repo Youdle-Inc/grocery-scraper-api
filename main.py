@@ -603,6 +603,7 @@ async def search_products(
     - `stores`: Comma-separated store IDs to search (e.g., "target,walmart")
     - `limit`: Maximum number of products to return (default: 50, max: 100)
     - `refresh`: Bypass cache (default: false)
+    - `all_stores`: Search all 28 supported stores instead of default top 5 (default: false)
 
     **Example Requests:**
     ```
@@ -610,6 +611,7 @@ async def search_products(
     GET /products/aggregate?query=milk&zipcode=60601&stores=target,walmart
     GET /products/aggregate?query=bread&zipcode=10001&radius_miles=15
     GET /products/aggregate?query=eggs&zipcode=60601&limit=10
+    GET /products/aggregate?query=eggs&zipcode=60601&all_stores=true
     ```
 
     **Example Response:**
@@ -668,7 +670,8 @@ async def aggregate_products(
     radius_miles: int = Query(10, ge=1, le=50, description="Search radius in miles"),
     stores: Optional[str] = Query(None, description="Comma-separated store IDs", example="target,walmart"),
     limit: int = Query(50, ge=1, le=100, description="Maximum number of products to return"),
-    refresh: bool = Query(False, description="Bypass cache")
+    refresh: bool = Query(False, description="Bypass cache"),
+    all_stores: bool = Query(False, description="Search all 28 supported stores instead of default top 5")
 ):
     """Compare products across multiple stores"""
     import re  # Import at function level for use in derive_image_from_product_url
@@ -682,9 +685,25 @@ async def aggregate_products(
         if stores:
             user_store_ids = [s.strip().lower() for s in stores.split(",") if s.strip()]
 
-        # Default major grocery store chains
+        # Default major grocery store chains - top 5 most popular
         default_stores = ["target", "walmart", "whole_foods", "kroger", "aldi"]
-        considered_store_ids = user_store_ids[:10] if user_store_ids else default_stores
+        
+        # All supported stores (28 total)
+        all_supported_stores = [
+            "target", "walmart", "kroger", "costco", "albertsons", 
+            "safeway", "jewel_osco", "ahold_delhaize", "publix", "heb",
+            "aldi", "sams_club", "whole_foods", "meijer", "winco",
+            "bjs", "dollar_general", "dollar_tree", "trader_joes",
+            "hy_vee", "wegmans", "sprouts", "giant_eagle", "price_chopper",
+            "cash_saver", "south_point_grocery", "high_point_grocery",
+            "rs_market", "miss_cordelias"
+        ]
+        
+        # Use all stores if all_stores=true, otherwise use default top 5
+        if all_stores:
+            considered_store_ids = user_store_ids[:30] if user_store_ids else all_supported_stores
+        else:
+            considered_store_ids = user_store_ids[:10] if user_store_ids else default_stores
 
         # Helper functions for data normalization (needed for cache transformation)
         def norm_text(s: Optional[str]) -> str:
@@ -1332,6 +1351,7 @@ async def aggregate_products(
     - `stores`: Comma-separated store IDs (e.g., "target,walmart")
     - `limit`: Maximum products per store (default: 10)
     - `refresh`: Bypass cache (default: false)
+    - `all_stores`: Search all 28 supported stores instead of default top 5 (default: false)
     
     **Example Usage (JavaScript):**
     ```javascript
@@ -1363,7 +1383,8 @@ async def aggregate_products_stream(
     zipcode: str = Query(..., description="5-digit ZIP code", example="60601"),
     stores: Optional[str] = Query(None, description="Comma-separated store IDs", example="target,walmart"),
     limit: int = Query(10, ge=1, le=50, description="Maximum products per store"),
-    refresh: bool = Query(False, description="Bypass cache")
+    refresh: bool = Query(False, description="Bypass cache"),
+    all_stores: bool = Query(False, description="Search all 28 supported stores instead of default top 5")
 ):
     """Stream product results as they come in from each store"""
     import re
@@ -1378,8 +1399,25 @@ async def aggregate_products_stream(
         if stores:
             user_store_ids = [s.strip().lower() for s in stores.split(",") if s.strip()]
         
+        # Default major grocery store chains - top 5 most popular
         default_stores = ["target", "walmart", "whole_foods", "kroger", "aldi"]
-        considered_store_ids = user_store_ids[:10] if user_store_ids else default_stores
+        
+        # All supported stores (28 total)
+        all_supported_stores = [
+            "target", "walmart", "kroger", "costco", "albertsons", 
+            "safeway", "jewel_osco", "ahold_delhaize", "publix", "heb",
+            "aldi", "sams_club", "whole_foods", "meijer", "winco",
+            "bjs", "dollar_general", "dollar_tree", "trader_joes",
+            "hy_vee", "wegmans", "sprouts", "giant_eagle", "price_chopper",
+            "cash_saver", "south_point_grocery", "high_point_grocery",
+            "rs_market", "miss_cordelias"
+        ]
+        
+        # Use all stores if all_stores=true, otherwise use default top 5
+        if all_stores:
+            considered_store_ids = user_store_ids[:30] if user_store_ids else all_supported_stores
+        else:
+            considered_store_ids = user_store_ids[:10] if user_store_ids else default_stores
         
         def to_store_name(store_id: str) -> str:
             return exa_client.get_store_display_name(store_id)
