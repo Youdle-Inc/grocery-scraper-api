@@ -41,6 +41,7 @@ See [TEST_CURL_COMMANDS.md](./TEST_CURL_COMMANDS.md) for comprehensive examples.
 - **Location-Based Filtering**: Works with any ZIP code for accurate location-based results
 - **Perplexity-Style Insights**: Overview summaries and follow-up query suggestions
 - **Real-Time Streaming**: Get results as they come in with Server-Sent Events
+- **AI Validation**: Automatically filters out generic placeholders and validates product data quality
 
 ### 🚀 Performance & Reliability
 - **Fast Response Times**: Optimized for quick product searches
@@ -416,6 +417,7 @@ python test_exa_integration.py
 - ✅ **All Stores Parameter**: Option to search all 28 stores with `all_stores=true`
 - ✅ **Universal Search**: AI-powered query understanding and multi-strategy search
 - ✅ **28+ Supported Stores**: Comprehensive store coverage
+- ✅ **AI Product Validation**: Automatically filters out generic/placeholder products and validates real prices
 
 ### Version 2.1.0
 - ✅ **Universal Location Filtering**: Works with any ZIP code, not just hardcoded locations

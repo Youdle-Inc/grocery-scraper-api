@@ -51,6 +51,7 @@ from scraper.universal_search import UniversalGrocerySearch
 from scraper.availability_checker import AvailabilityChecker
 from scraper.url_location_enhancer import URLLocationEnhancer
 from scraper.search_insights import SearchInsightsGenerator
+from scraper.product_validator import ProductValidator
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -168,6 +169,7 @@ cache = Cache()
 universal_search = UniversalGrocerySearch(exa_client)  # Universal search service
 availability_checker = AvailabilityChecker(exa_client)  # Availability checker
 search_insights = SearchInsightsGenerator()  # Search insights generator
+product_validator = ProductValidator()  # Product data validator
 
 # Debug: Check client status
 logger.info(f"🔍 ExaStructuredClient initialized: {exa_client.is_available()}")
@@ -1339,6 +1341,31 @@ async def aggregate_products(
         
         enhanced_response = await transform_to_enhanced_format(grouped, considered_store_ids, query, zipcode, store_locations_cache)
 
+        # Validate products - filter out generic/placeholder products
+        original_count = len(enhanced_response.get("results", []))
+        logger.info(f"🔍 Validating {original_count} products...")
+        validated_results = await product_validator.validate_batch(
+            products=enhanced_response.get("results", []),
+            original_query=query,
+            min_confidence=0.6
+        )
+        
+        # Filter invalid offers within each product
+        for product in validated_results:
+            if product.get("offers"):
+                product["offers"] = product_validator.filter_invalid_offers(product["offers"])
+        
+        # Remove products with no valid offers
+        validated_results = [p for p in validated_results if p.get("offers") and len(p.get("offers", [])) > 0]
+        
+        # Update results with validated products
+        enhanced_response["results"] = validated_results
+        
+        # Log validation stats
+        filtered_count = original_count - len(validated_results)
+        if filtered_count > 0:
+            logger.info(f"✅ Filtered out {filtered_count} invalid/generic products")
+        
         # Apply limit to results
         if limit and len(enhanced_response.get("results", [])) > limit:
             enhanced_response["results"] = enhanced_response["results"][:limit]
