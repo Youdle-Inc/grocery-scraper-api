@@ -10,6 +10,7 @@ import logging
 from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
 from exa_py import Exa
+from scraper.url_location_enhancer import URLLocationEnhancer
 # Prompt templates removed - using inline prompts
 
 load_dotenv()
@@ -20,23 +21,102 @@ logger = logging.getLogger(__name__)
 class ExaStructuredClient:
     """Enhanced Exa client for structured grocery product data extraction"""
     
-    # Store domain mapping for search optimization
+    # Store domain mapping for search optimization - comprehensive list
     STORE_DOMAINS = {
+        # Major chains
         "target": "target.com",
         "walmart": "walmart.com",
-        "whole_foods": "wholefoodsmarket.com",
-        "whole foods": "wholefoodsmarket.com",
-        "aldi": "aldi.us",
-        "costco": "costco.com",
         "kroger": "kroger.com",
-        "sams_club": "samsclub.com",
-        "trader_joes": "traderjoes.com",
-        "trader joe's": "traderjoes.com",
-        "safeway": "safeway.com",
+        "costco": "costco.com",
         "albertsons": "albertsons.com",
+        "safeway": "safeway.com",  # Albertsons family
+        "vons": "vons.com",  # Albertsons family
+        "jewel": "jewelosco.com",  # Albertsons family
+        "jewel_osco": "jewelosco.com",  # Albertsons family
+        "ahold_delhaize": "aholddelhaize.com",
+        "food_lion": "foodlion.com",  # Ahold Delhaize
+        "giant": "giantfood.com",  # Ahold Delhaize
+        "harris_teeter": "harristeeter.com",  # Ahold Delhaize
+        "hannaford": "hannaford.com",  # Ahold Delhaize
+        "stop_and_shop": "stopandshop.com",  # Ahold Delhaize
+        "stop_n_shop": "stopandshop.com",  # Ahold Delhaize
         "publix": "publix.com",
         "heb": "heb.com",
+        "aldi": "aldi.us",
+        "sams_club": "samsclub.com",
+        "whole_foods": "wholefoodsmarket.com",
+        "whole foods": "wholefoodsmarket.com",
+        "wholefoods": "wholefoodsmarket.com",
+        "whole_foods_market": "wholefoodsmarket.com",
+        "amazon_fresh": "amazon.com",  # Amazon Fresh
+        "meijer": "meijer.com",
+        "winco": "wincofoods.com",
+        "bjs": "bjs.com",
+        "bj's": "bjs.com",
+        "bjs_wholesale": "bjs.com",
+        "dollar_general": "dollargeneral.com",
+        "dollar_tree": "dollartree.com",
+        "trader_joes": "traderjoes.com",
+        "trader joe's": "traderjoes.com",
+        "hy_vee": "hy-vee.com",
         "wegmans": "wegmans.com",
+        "sprouts": "sprouts.com",
+        "giant_eagle": "gianteagle.com",
+        "gianteagle": "gianteagle.com",
+        "price_chopper": "pricechopper.com",
+        "cash_saver": "cashsaver.com",
+        "south_point_grocery": "southpointgrocery.com",
+        "high_point_grocery": "highpointgrocery.com",
+        "rs_market": "rsmarket.com",
+        "miss_cordelias": "misscordelias.com",
+    }
+    
+    # Store display name mapping
+    STORE_DISPLAY_NAMES = {
+        "target": "Target",
+        "walmart": "Walmart",
+        "kroger": "Kroger",
+        "costco": "Costco",
+        "albertsons": "Albertsons",
+        "safeway": "Safeway",
+        "vons": "Vons",
+        "jewel": "Jewel-Osco",
+        "jewel_osco": "Jewel-Osco",
+        "ahold_delhaize": "Ahold Delhaize",
+        "food_lion": "Food Lion",
+        "giant": "Giant",
+        "harris_teeter": "Harris Teeter",
+        "hannaford": "Hannaford",
+        "stop_and_shop": "Stop & Shop",
+        "stop_n_shop": "Stop & Shop",
+        "publix": "Publix",
+        "heb": "H-E-B",
+        "aldi": "ALDI",
+        "sams_club": "Sam's Club",
+        "whole_foods": "Whole Foods Market",
+        "wholefoods": "Whole Foods Market",
+        "whole_foods_market": "Whole Foods Market",
+        "amazon_fresh": "Amazon Fresh",
+        "meijer": "Meijer",
+        "winco": "WinCo Foods",
+        "bjs": "BJ's Wholesale Club",
+        "bj's": "BJ's Wholesale Club",
+        "bjs_wholesale": "BJ's Wholesale Club",
+        "dollar_general": "Dollar General",
+        "dollar_tree": "Dollar Tree",
+        "trader_joes": "Trader Joe's",
+        "trader joe's": "Trader Joe's",
+        "hy_vee": "Hy-Vee",
+        "wegmans": "Wegmans",
+        "sprouts": "Sprouts Farmers Market",
+        "giant_eagle": "Giant Eagle",
+        "gianteagle": "Giant Eagle",
+        "price_chopper": "Price Chopper",
+        "cash_saver": "Cash Saver",
+        "south_point_grocery": "South Point Grocery",
+        "high_point_grocery": "High Point Grocery",
+        "rs_market": "RS Market",
+        "miss_cordelias": "Miss Cordelia's",
     }
     
     def __init__(self, api_key: Optional[str] = None):
@@ -63,6 +143,134 @@ class ExaStructuredClient:
     def _get_store_domain(self, store_name: str) -> Optional[str]:
         """Get domain for store name"""
         return self.STORE_DOMAINS.get(store_name.lower().strip())
+    
+    def get_store_display_name(self, store_id: str) -> str:
+        """Get display name for store ID"""
+        store_id_lower = store_id.lower().strip()
+        # Try exact match first
+        display_name = self.STORE_DISPLAY_NAMES.get(store_id_lower)
+        if display_name:
+            return display_name
+        # Try with underscores/spaces variations
+        for key, value in self.STORE_DISPLAY_NAMES.items():
+            if key.replace('_', ' ') == store_id_lower.replace('_', ' '):
+                return value
+        # Fallback: capitalize and format
+        return store_id.replace('_', ' ').title()
+    
+    def parse_availability(self, availability_text: Optional[str]) -> str:
+        """
+        Parse availability text into standardized status codes
+        
+        Returns:
+            "IN_STOCK" - Product is available
+            "OUT_OF_STOCK" - Product is sold out/unavailable
+            "LOW_STOCK" - Limited availability
+            "CHECK_STORE" - Cannot determine from available data
+        """
+        if not availability_text:
+            return "CHECK_STORE"
+        
+        availability_lower = availability_text.lower().strip()
+        
+        # Out of stock indicators (check these first)
+        out_of_stock_patterns = [
+            "out of stock",
+            "sold out",
+            "unavailable",
+            "not available",
+            "currently unavailable",
+            "temporarily unavailable",
+            "out of stock online",
+            "out of stock at",
+            "no longer available",
+            "discontinued",
+            "unavailable for",
+            "not in stock",
+            "stock unavailable",
+            "out of stock for",
+            "unavailable online",
+            "unavailable in store",
+            "out of stock in",
+            "sold out online",
+            "sold out at",
+            "no stock",
+            "zero stock"
+        ]
+        
+        for pattern in out_of_stock_patterns:
+            if pattern in availability_lower:
+                return "OUT_OF_STOCK"
+        
+        # Low stock indicators
+        low_stock_patterns = [
+            "low stock",
+            "limited availability",
+            "limited stock",
+            "few left",
+            "only a few",
+            "running low",
+            "limited quantity",
+            "limited supply",
+            "almost out",
+            "low inventory",
+            "limited inventory"
+        ]
+        
+        for pattern in low_stock_patterns:
+            if pattern in availability_lower:
+                return "LOW_STOCK"
+        
+        # In stock indicators
+        in_stock_patterns = [
+            "in stock",
+            "available",
+            "add to cart",
+            "add to bag",
+            "buy now",
+            "add to list",
+            "available now",
+            "in stock now",
+            "available for",
+            "available online",
+            "available in store",
+            "available for pickup",
+            "available for delivery",
+            "ready to ship",
+            "ships in",
+            "usually ships",
+            "stock available",
+            "currently available",
+            "available today",
+            "in stock at",
+            "available at"
+        ]
+        
+        for pattern in in_stock_patterns:
+            if pattern in availability_lower:
+                return "IN_STOCK"
+        
+        # Check store patterns (ambiguous)
+        check_store_patterns = [
+            "check store",
+            "check availability",
+            "see store",
+            "contact store",
+            "call store",
+            "store availability",
+            "varies by location",
+            "availability varies",
+            "check local store",
+            "store dependent"
+        ]
+        
+        for pattern in check_store_patterns:
+            if pattern in availability_lower:
+                return "CHECK_STORE"
+        
+        # Default: if text exists but doesn't match patterns, assume check store
+        # (better to be cautious than wrong)
+        return "CHECK_STORE"
     
     def _detect_product_category(self, query: str) -> str:
         """Detect product category from search query"""
@@ -250,7 +458,7 @@ class ExaStructuredClient:
                     },
                     "availability": {
                         "type": "string",
-                        "description": "Stock availability status"
+                        "description": "Stock availability status. Extract exact status from page: 'in stock', 'out of stock', 'sold out', 'available', 'unavailable', 'low stock', 'limited availability', 'check store', 'available for pickup', 'available for delivery', or similar. Be precise - look for stock status indicators, 'add to cart' buttons (usually means in stock), 'out of stock' messages, or inventory warnings."
                     },
                     "store_name": {
                         "type": "string",
@@ -805,6 +1013,39 @@ class ExaStructuredClient:
                 # Fallback to text extraction
                 description = self._extract_product_description(text, title)
             
+            # Extract availability from structured data or text
+            availability_text = None
+            
+            # Try to get from structured data first (if Exa extracted it)
+            if hasattr(result, "structured") and result.structured:
+                structured_data = result.structured
+                if isinstance(structured_data, dict):
+                    availability_text = structured_data.get("availability")
+                elif hasattr(structured_data, "availability"):
+                    availability_text = getattr(structured_data, "availability", None)
+            
+            # If not in structured data, try to extract from text
+            if not availability_text:
+                # Look for availability patterns in text
+                availability_patterns = [
+                    r'(?:in stock|out of stock|sold out|available|unavailable|low stock)',
+                    r'(?:add to cart|add to bag|buy now)',
+                    r'(?:currently unavailable|temporarily unavailable)',
+                ]
+                for pattern in availability_patterns:
+                    match = re.search(pattern, text, re.IGNORECASE)
+                    if match:
+                        availability_text = match.group(0)
+                        break
+            
+            # Parse availability using comprehensive parser
+            availability = self.parse_availability(availability_text)
+            
+            # Enhance product URL with location if zipcode provided
+            if url and zipcode:
+                store_id = detected_store.lower() if detected_store else None
+                url = URLLocationEnhancer.enhance_url_with_location(url, zipcode, store_id)
+            
             # Build product object
             product = {
                 "name": title,
@@ -812,9 +1053,9 @@ class ExaStructuredClient:
                 "price": price,
                 "currency": "USD",
                 "quantity": quantity,
-                "availability": "Check Store",
+                "availability": availability,
                 "image_url": image_url,
-                "product_url": url,
+                "product_url": url,  # Use enhanced URL
                 "description": description,
                 "category": None,
                 "rating": None,

@@ -6,7 +6,7 @@ A professional FastAPI service for scraping grocery store product data
 
 from fastapi import FastAPI, HTTPException, Query, Path
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from typing import List, Optional, Dict, Any
 import asyncio
 import os
@@ -47,6 +47,9 @@ from scraper.models import (
 from scraper.image_scraper import ImageScraper
 from scraper.ai_scraper import AIScraper
 from scraper.html_image_extractor import HTMLImageExtractor
+from scraper.universal_search import UniversalGrocerySearch
+from scraper.availability_checker import AvailabilityChecker
+from scraper.url_location_enhancer import URLLocationEnhancer
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -1311,6 +1314,186 @@ async def aggregate_products(
         raise
     except Exception as e:
         logger.error(f"❌ Aggregate product search failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get(
+    "/products/aggregate/stream",
+    tags=["📊 Aggregate"],
+    summary="Stream Products Across Stores (Real-time)",
+    description="""
+    Stream product results as they come in from each store - perfect for web apps!
+    
+    Returns results incrementally using Server-Sent Events (SSE) as each store completes.
+    No more waiting 1 minute for all stores - see results in seconds!
+    
+    **Parameters:**
+    - `query` (required): Product to search for
+    - `zipcode` (required): 5-digit ZIP code
+    - `stores`: Comma-separated store IDs (e.g., "target,walmart")
+    - `limit`: Maximum products per store (default: 10)
+    - `refresh`: Bypass cache (default: false)
+    
+    **Example Usage (JavaScript):**
+    ```javascript
+    const eventSource = new EventSource(
+      '/products/aggregate/stream?query=eggs&zipcode=60601&stores=target,walmart'
+    );
+    
+    eventSource.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === 'store_complete') {
+        console.log('Store completed:', data.store_name);
+        console.log('Products:', data.products);
+        // Update your UI here!
+      } else if (data.type === 'done') {
+        console.log('All stores complete!');
+        eventSource.close();
+      }
+    };
+    ```
+    
+    **Example Usage (cURL):**
+    ```bash
+    curl -N "http://localhost:8000/products/aggregate/stream?query=eggs&zipcode=60601&stores=target,walmart"
+    ```
+    """,
+)
+async def aggregate_products_stream(
+    query: str = Query(..., description="Product to search for", example="eggs"),
+    zipcode: str = Query(..., description="5-digit ZIP code", example="60601"),
+    stores: Optional[str] = Query(None, description="Comma-separated store IDs", example="target,walmart"),
+    limit: int = Query(10, ge=1, le=50, description="Maximum products per store"),
+    refresh: bool = Query(False, description="Bypass cache")
+):
+    """Stream product results as they come in from each store"""
+    import re
+    
+    try:
+        # Validate zipcode
+        if not re.match(r"^\d{5}$", zipcode):
+            raise HTTPException(status_code=400, detail="Invalid zipcode format")
+        
+        # Determine store set
+        user_store_ids = []
+        if stores:
+            user_store_ids = [s.strip().lower() for s in stores.split(",") if s.strip()]
+        
+        default_stores = ["target", "walmart", "whole_foods", "kroger", "aldi"]
+        considered_store_ids = user_store_ids[:10] if user_store_ids else default_stores
+        
+        def to_store_name(store_id: str) -> str:
+            return exa_client.get_store_display_name(store_id)
+        
+        async def generate_stream():
+            """Generator that yields SSE events as stores complete"""
+            try:
+                # Send initial event
+                yield f"data: {json.dumps({'type': 'start', 'query': query, 'zipcode': zipcode, 'stores': considered_store_ids})}\n\n"
+                
+                if not exa_client.is_available():
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'Exa client not available'})}\n\n"
+                    return
+                
+                # Search products across stores with streaming
+                semaphore = asyncio.Semaphore(5)
+                
+                async def fetch_store_products_stream(store_id: str):
+                    async with semaphore:
+                        try:
+                            store_name = to_store_name(store_id)
+                            logger.info(f"🔍 Searching {store_name} for '{query}' near {zipcode}")
+                            
+                            products = await exa_client.search_products_structured(
+                                query=query,
+                                store_name=store_name,
+                                zipcode=zipcode,
+                                num_results=limit,
+                                include_location=True,
+                                context="price_comparison"
+                            )
+                            
+                            # Enhance URLs with location
+                            for product in products:
+                                product_url = product.get("product_url")
+                                if product_url and zipcode:
+                                    store_id_lower = store_id.lower()
+                                    product["product_url"] = URLLocationEnhancer.enhance_url_with_location(
+                                        product_url, zipcode, store_id_lower
+                                    )
+                            
+                            return {
+                                'store_id': store_id,
+                                'store_name': store_name,
+                                'products': products
+                            }
+                        except Exception as e:
+                            logger.warning(f"Error fetching from {store_id}: {e}")
+                            return {
+                                'store_id': store_id,
+                                'store_name': to_store_name(store_id),
+                                'products': []
+                            }
+                
+                # Create tasks for all stores
+                tasks = [fetch_store_products_stream(sid) for sid in considered_store_ids]
+                
+                # Process as they complete and yield results immediately
+                completed_count = 0
+                for coro in asyncio.as_completed(tasks):
+                    try:
+                        result = await coro
+                        completed_count += 1
+                        
+                        # Send "store_complete" event immediately
+                        yield f"data: {json.dumps({
+                            'type': 'store_complete',
+                            'store_id': result['store_id'],
+                            'store_name': result['store_name'],
+                            'products': result['products'],
+                            'count': len(result['products']),
+                            'progress': {
+                                'completed': completed_count,
+                                'total': len(considered_store_ids)
+                            }
+                        })}\n\n"
+                        
+                    except Exception as e:
+                        completed_count += 1
+                        logger.error(f"Task failed: {e}")
+                        yield f"data: {json.dumps({
+                            'type': 'store_error',
+                            'error': str(e),
+                            'progress': {
+                                'completed': completed_count,
+                                'total': len(considered_store_ids)
+                            }
+                        })}\n\n"
+                
+                # Send completion event
+                yield f"data: {json.dumps({
+                    'type': 'done',
+                    'total_stores': len(considered_store_ids),
+                    'completed_stores': completed_count
+                })}\n\n"
+                
+            except Exception as e:
+                logger.error(f"Stream error: {e}")
+                yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        
+        return StreamingResponse(
+            generate_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"  # Disable buffering in nginx
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Stream endpoint failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
