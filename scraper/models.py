@@ -109,7 +109,7 @@ class LocationSearchResponse(BaseModel):
 # === Response models for FastAPI endpoints ===
 
 class HealthServiceStatus(BaseModel):
-    exa_api: str
+    serper_api: str
 
 class HealthResponse(BaseModel):
     status: str

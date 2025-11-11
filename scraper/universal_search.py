@@ -10,16 +10,16 @@ from datetime import datetime
 
 from scraper.query_understanding import QueryUnderstanding
 from scraper.result_ranker import ResultRanker
-from scraper.exa_structured_client import ExaStructuredClient
+from scraper.serper_client import SerperClient
 
 logger = logging.getLogger(__name__)
 
 class UniversalGrocerySearch:
     """Universal grocery search with multi-strategy approach"""
     
-    def __init__(self, exa_client: ExaStructuredClient):
+    def __init__(self, serper_client: SerperClient):
         """Initialize universal search service"""
-        self.exa_client = exa_client
+        self.serper_client = serper_client
         self.query_understanding = QueryUnderstanding()
         self.result_ranker = ResultRanker(self.query_understanding)
     
@@ -59,7 +59,7 @@ class UniversalGrocerySearch:
         
         # Strategy 1: Primary enhanced query (always run)
         try:
-            primary_results = await self._search_with_exa(
+            primary_results = await self._search_with_serper(
                 optimal_queries['primary'],
                 zipcode,
                 store_name,
@@ -87,7 +87,7 @@ class UniversalGrocerySearch:
         # Strategy 3: Category-based (if category detected)
         if optimal_queries['category_based'] and query_analysis['has_category']:
             try:
-                category_results = await self._search_with_exa(
+                category_results = await self._search_with_instacart(
                     optimal_queries['category_based'],
                     zipcode,
                     store_name,
@@ -101,7 +101,7 @@ class UniversalGrocerySearch:
         # Strategy 4: Brand-based (if brand detected)
         if optimal_queries['brand_based'] and query_analysis['has_brand']:
             try:
-                brand_results = await self._search_with_exa(
+                brand_results = await self._search_with_instacart(
                     optimal_queries['brand_based'],
                     zipcode,
                     store_name,
@@ -139,19 +139,19 @@ class UniversalGrocerySearch:
             }
         }
     
-    async def _search_with_exa(
+    async def _search_with_serper(
         self,
         search_query: str,
         zipcode: Optional[str],
         store_name: Optional[str],
         num_results: int
     ) -> List[Dict]:
-        """Search using Exa API"""
-        if not self.exa_client.is_available():
+        """Search using Serper API"""
+        if not self.serper_client.is_available():
             return []
         
         try:
-            products = await self.exa_client.search_products_structured(
+            products = await self.serper_client.search_products_structured(
                 query=search_query,
                 store_name=store_name,
                 zipcode=zipcode,
@@ -160,7 +160,7 @@ class UniversalGrocerySearch:
             )
             return products
         except Exception as e:
-            logger.error(f"❌ Exa search failed: {e}")
+            logger.error(f"❌ Serper search failed: {e}")
             return []
     
     async def _search_expanded_queries(
@@ -176,7 +176,7 @@ class UniversalGrocerySearch:
         
         # Run expanded queries in parallel
         tasks = [
-            self._search_with_exa(query, zipcode, store_name, num_results_per_query)
+            self._search_with_serper(query, zipcode, store_name, num_results_per_query)
             for query in expanded_queries
         ]
         

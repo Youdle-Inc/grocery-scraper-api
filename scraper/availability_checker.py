@@ -9,7 +9,7 @@ import re
 import aiohttp
 from typing import Dict, List, Optional
 from bs4 import BeautifulSoup
-from scraper.exa_structured_client import ExaStructuredClient
+from scraper.serper_client import SerperClient
 from scraper.ai_scraper import AIScraper
 
 logger = logging.getLogger(__name__)
@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 class AvailabilityChecker:
     """Check product availability by fetching product pages with multiple methods"""
     
-    def __init__(self, exa_client: ExaStructuredClient):
-        self.exa_client = exa_client
+    def __init__(self, serper_client: SerperClient):
+        self.serper_client = serper_client
         self.ai_scraper = AIScraper()
     
     async def check_availability_batch(
@@ -32,7 +32,7 @@ class AvailabilityChecker:
         Returns:
             Dict mapping product_url -> availability status
         """
-        if not self.exa_client.is_available():
+        if not self.serper_client.is_available():
             return {}
         
         results = {}
@@ -68,14 +68,8 @@ class AvailabilityChecker:
         except Exception as e:
             logger.debug(f"HTML availability check failed: {e}")
         
-        # Method 2: Try Exa structured extraction
-        try:
-            availability = await self._check_with_exa(product_url)
-            if availability != "CHECK_STORE":
-                logger.info(f"✅ Exa found availability: {availability}")
-                return availability
-        except Exception as e:
-            logger.debug(f"Exa availability check failed: {e}")
+        # Method 2: Instacart products already include availability, so skip Exa check
+        # Instacart provides real-time availability data
         
         # Method 3: Try AI scraper
         try:
@@ -87,66 +81,6 @@ class AvailabilityChecker:
             logger.debug(f"AI scraper availability check failed: {e}")
         
         logger.warning(f"⚠️ Could not determine availability for: {product_url[:80]}...")
-        return "CHECK_STORE"
-    
-    async def _check_with_exa(self, product_url: str) -> str:
-        """Check availability using Exa structured extraction"""
-        if not hasattr(self.exa_client, '_client') or not self.exa_client._client:
-            return "CHECK_STORE"
-        
-        availability_schema = {
-            "type": "object",
-            "properties": {
-                "availability": {
-                    "type": "string",
-                    "description": "Exact stock status from page: 'in stock', 'out of stock', 'sold out', 'available', 'unavailable', 'low stock', 'add to cart', 'check store', etc. Look for stock status indicators, add to cart buttons, out of stock messages."
-                }
-            },
-            "required": ["availability"]
-        }
-        
-        response = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: self.exa_client._client.get_contents(
-                [product_url],
-                text={"max_characters": 3000},
-                summary={
-                    "query": "Extract ONLY the product availability/stock status from this page. Look for: 'in stock', 'out of stock', 'sold out', 'available', 'unavailable', 'add to cart' button (means in stock), 'out of stock' message, inventory warnings, stock status indicators. Be very thorough.",
-                    "schema": availability_schema
-                }
-            )
-        )
-        
-        if response and response.results:
-            result = response.results[0]
-            availability_text = None
-            
-            # Try structured data first
-            if hasattr(result, "structured") and result.structured:
-                structured = result.structured
-                if isinstance(structured, dict):
-                    availability_text = structured.get("availability")
-                elif hasattr(structured, "availability"):
-                    availability_text = getattr(structured, "availability", None)
-            
-            # Fall back to text extraction
-            if not availability_text:
-                text = getattr(result, "text", "")[:2000] if hasattr(result, "text") else ""
-                # Look for availability patterns
-                patterns = [
-                    r'(?:in stock|out of stock|sold out|available|unavailable|low stock)',
-                    r'(?:add to cart|add to bag|buy now|purchase)',
-                    r'(?:currently unavailable|temporarily unavailable)',
-                ]
-                for pattern in patterns:
-                    match = re.search(pattern, text, re.IGNORECASE)
-                    if match:
-                        availability_text = match.group(0)
-                        break
-            
-            if availability_text:
-                return self.exa_client.parse_availability(availability_text)
-        
         return "CHECK_STORE"
     
     async def _check_with_html(self, product_url: str) -> str:
@@ -289,7 +223,7 @@ class AvailabilityChecker:
             result = await self.ai_scraper.scrape_product_page(product_url)
             if result and result.get("availability"):
                 availability_text = result["availability"]
-                return self.exa_client.parse_availability(availability_text)
+                return self.serper_client.parse_availability(availability_text)
         except Exception as e:
             logger.debug(f"AI scraper availability check failed: {e}")
         

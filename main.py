@@ -20,17 +20,17 @@ load_dotenv()
 
 # Debug: Check if environment variables are loaded
 logger = logging.getLogger(__name__)
-exa_key = os.getenv("EXA_API_KEY")
-if exa_key:
-    logger.info(f"✅ EXA_API_KEY loaded: {exa_key[:10]}...")
+serper_key = os.getenv("SERPER_API_KEY", "80ff8a83e123e4ae68792aef4a946ee7335bd8ca")
+if serper_key:
+    logger.info(f"✅ SERPER_API_KEY loaded: {serper_key[:10]}...")
 else:
-    logger.warning("⚠️ EXA_API_KEY not found in environment")
+    logger.warning("⚠️ SERPER_API_KEY not found in environment")
 
 # Import our scraper modules
 from scraper.models import StoreInfo
 from scraper.location_service import LocationService
 from scraper.cache import Cache, stores_key, products_key
-from scraper.exa_structured_client import ExaStructuredClient
+from scraper.serper_client import SerperClient
 from scraper.models import (
     HealthResponse,
     StoresResponse,
@@ -97,7 +97,7 @@ app = FastAPI(
     ### ✨ Features
     - **Real Product URLs**: Direct links to Target, Walmart, and other major stores
     - **High-Quality Images**: 800x800+ product images from store CDNs
-    - **Smart Search**: AI-powered semantic search with Exa API
+    - **Smart Search**: Google-powered search via Serper API across all stores
     - **Multi-Store Comparison**: Compare products across different retailers in one request
     - **Universal Location Filtering**: Works with any ZIP code for accurate location-based results
     - **Flexible Result Limits**: Control number of products returned (default: 50, max: 100)
@@ -167,25 +167,25 @@ app.add_middleware(
 # Static files removed for Vercel compatibility
 
 # Initialize services
-exa_client = ExaStructuredClient()
+serper_client = SerperClient()
 location_service = LocationService()
 ai_scraper = AIScraper()  # AI-powered scraper for direct price extraction
 cache = Cache()
-universal_search = UniversalGrocerySearch(exa_client)  # Universal search service
-availability_checker = AvailabilityChecker(exa_client)  # Availability checker
+universal_search = UniversalGrocerySearch(serper_client)  # Universal search service
+availability_checker = AvailabilityChecker(serper_client)  # Availability checker
 search_insights = SearchInsightsGenerator()  # Search insights generator
 product_validator = ProductValidator()  # Product data validator
 
 # Debug: Check client status
-logger.info(f"🔍 ExaStructuredClient initialized: {exa_client.is_available()}")
-logger.info(f"🔑 API key loaded: {bool(exa_client.api_key)}")
+logger.info(f"🔍 SerperClient initialized: {serper_client.is_available()}")
+logger.info(f"🔑 API key loaded: {bool(serper_client.api_key)}")
 
 @app.on_event("startup")
 async def startup_event():
     """Initialize the API on startup"""
-    logger.info("🚀 Starting Grocery Scraper API with Exa Integration...")
-    logger.info(f"🔍 Exa available: {exa_client.is_available()}")
-    logger.info(f"🔑 EXA_API_KEY loaded: {bool(os.getenv('EXA_API_KEY'))}")
+    logger.info("🚀 Starting Grocery Scraper API with Serper Integration...")
+    logger.info(f"🔍 Serper available: {serper_client.is_available()}")
+    logger.info(f"🔑 SERPER_API_KEY loaded: {bool(os.getenv('SERPER_API_KEY') or serper_client.api_key)}")
     logger.info(f"🌍 Environment: {os.getenv('ENVIRONMENT', 'development')}")
 
 from fastapi.openapi.docs import get_redoc_html
@@ -205,7 +205,7 @@ async def api_info():
     return {
         "name": "Grocery Scraper API",
         "version": "3.0.0",
-        "description": "AI-powered grocery product discovery with Exa - structured data with real URLs, images, and AI validation",
+        "description": "AI-powered grocery product discovery with Serper - fast Google-powered search across stores",
         "endpoints": {
             "health": "/health",
             "stores": "/stores/{zipcode}",
@@ -214,7 +214,7 @@ async def api_info():
             "aggregate_stream": "/products/aggregate/stream"
         },
         "features": [
-            "Exa-powered structured product search",
+            "Serper-powered Google search across stores",
             "Real product URLs and high-quality images (800x800+)",
             "Store location discovery (works with any ZIP code)",
             "Smart product matching across multiple stores",
@@ -255,16 +255,16 @@ async def api_info():
     description="""
     Check if the API and all services are running properly.
 
-    Returns the current status, version, and availability of external services (Exa API).
+    Returns the current status, version, and availability of external services (Serper API).
 
     **Example Response:**
     ```json
     {
       "status": "healthy",
       "timestamp": "2025-10-28T11:45:16.737109",
-      "version": "2.0.0",
+      "version": "3.0.0",
       "services": {
-        "exa_api": "available"
+        "instacart_api": "available"
       }
     }
     ```
@@ -272,14 +272,23 @@ async def api_info():
 )
 def health_check():
     """Health check endpoint - verify API is running"""
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "version": "2.0.0",
-        "services": {
-            "exa_api": "available"
+    try:
+        return {
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "version": "3.0.0",
+            "services": {
+                "serper_api": "available" if serper_client.is_available() else "unavailable"
+            }
         }
-    }
+    except Exception as e:
+        logger.error(f"Health check error: {e}")
+        return {
+            "status": "error",
+            "timestamp": datetime.now().isoformat(),
+            "version": "3.0.0",
+            "error": str(e)
+        }
 
 
 
@@ -352,10 +361,10 @@ async def get_stores_in_zipcode(
             logger.info(f"cache_hit stores zip={zipcode}")
             return {**cached, "cache": {"hit": True}}
 
-        if not exa_client.is_available():
+        if not serper_client.is_available():
             raise HTTPException(
                 status_code=503,
-                detail="Exa client not available - check API key configuration"
+                detail="Serper client not available - check API key configuration"
             )
         
         # Get stores for specific chain or major chains
@@ -365,7 +374,7 @@ async def get_stores_in_zipcode(
         ]
         
         for chain in chains_to_search:
-            stores = await exa_client.search_stores_in_zipcode(chain, zipcode)
+            stores = await serper_client.search_stores_in_zipcode(chain, zipcode)
             all_stores.extend(stores)
         
         response_payload = {
@@ -389,8 +398,8 @@ async def get_stores_in_zipcode(
                 }
                 for store in all_stores
             ],
-            "source": "exa_structured",
-            "api_version": "2.0.0"
+            "source": "serper",
+            "api_version": "3.0.0"
         }
         
         # Cache the results
@@ -409,7 +418,7 @@ async def get_stores_in_zipcode(
                     "search_timestamp": datetime.now().isoformat(),
             "stores": [],
             "source": f"error:{str(e)}",
-            "api_version": "2.0.0",
+            "api_version": "3.0.0",
         }
 
     
@@ -497,14 +506,14 @@ async def search_products(
             logger.info(f"cache_hit products q='{query}'")
             return {**cached, "cache": {"hit": True}}
         
-        if not exa_client.is_available():
+        if not serper_client.is_available():
             raise HTTPException(
                 status_code=503,
-                detail="Exa client not available - check API key configuration"
+                detail="Serper client not available - check API key configuration"
             )
         
-        # Search with Exa structured client using optimized prompts
-        products = await exa_client.search_products_structured(
+        # Search with Serper API
+        products = await serper_client.search_products_structured(
             query=query,
             store_name=store_name,
             zipcode=zipcode,
@@ -523,20 +532,8 @@ async def search_products(
             logger.info(f"🖼️ Extracting images for {len(products_needing_images)} products missing images...")
             urls_to_fetch = [p.get("product_url") for _, p in products_needing_images]
             
-            # Priority 1: Try Exa batch extraction
-            exa_image_results = {}
-            if exa_client.is_available():
-                try:
-                    exa_image_results = await exa_client.get_product_images_batch(
-                        urls_to_fetch,
-                        max_concurrent=5
-                    )
-                    logger.info(f"✅ Exa batch: {sum(1 for v in exa_image_results.values() if v)}/{len(exa_image_results)} images found")
-                except Exception as e:
-                    logger.debug(f"Exa batch extraction failed: {e}")
-            
-            # Priority 2: HTML scraper for remaining
-            remaining_urls = [url for url in urls_to_fetch if url not in exa_image_results or not exa_image_results[url]]
+            # Instacart products already include images, so we only use HTML scraper as fallback
+            remaining_urls = urls_to_fetch
             html_image_results = {}
             if remaining_urls:
                 try:
@@ -552,13 +549,8 @@ async def search_products(
             # Update products with extracted images
             for idx, product in products_needing_images:
                 product_url = product.get("product_url")
-                if product_url:
-                    # Try Exa first
-                    if product_url in exa_image_results and exa_image_results[product_url]:
-                        products[idx]["image_url"] = exa_image_results[product_url]
-                    # Then HTML scraper
-                    elif product_url in html_image_results and html_image_results[product_url]:
-                        products[idx]["image_url"] = html_image_results[product_url]
+                if product_url and product_url in html_image_results and html_image_results[product_url]:
+                    products[idx]["image_url"] = html_image_results[product_url]
         
         response_payload = {
             "query": query,
@@ -567,8 +559,8 @@ async def search_products(
             "products_found": len(products),
             "search_timestamp": datetime.now().isoformat(),
             "products": products,
-            "source": "exa_structured",
-            "api_version": "2.0.0"
+            "source": "serper",
+            "api_version": "3.0.0"
         }
         
         # Cache the results
@@ -589,7 +581,7 @@ async def search_products(
             "search_timestamp": datetime.now().isoformat(),
             "products": [],
             "source": f"error:{str(e)}",
-            "api_version": "2.0.0"
+            "api_version": "3.0.0"
         }
 
 
@@ -808,7 +800,7 @@ async def aggregate_products(
                 async def fetch_store_locations(store_id: str):
                     try:
                         store_name = to_store_name(store_id)
-                        stores = await exa_client.search_stores_in_zipcode(store_name, zipcode)
+                        stores = await serper_client.search_stores_in_zipcode(store_name, zipcode)
                         if stores:
                             store_locations_cache[store_id] = stores[0]
                     except Exception as e:
@@ -830,10 +822,10 @@ async def aggregate_products(
                     enhanced_cached["results"] = enhanced_cached["results"][:limit]
                 return enhanced_cached
 
-        if not exa_client.is_available():
+        if not serper_client.is_available():
             raise HTTPException(
                 status_code=503,
-                detail="Exa client not available - check API key configuration"
+                detail="Serper client not available - check API key configuration"
             )
 
         # Search products across all stores concurrently
@@ -845,7 +837,7 @@ async def aggregate_products(
                     store_name = to_store_name(store_id)
                     logger.info(f"Searching {store_name} for '{query}' near {zipcode}")
                     
-                    products = await exa_client.search_products_structured(
+                    products = await serper_client.search_products_structured(
                         query=query,
                         store_name=store_name,
                         zipcode=zipcode,
@@ -927,19 +919,19 @@ async def aggregate_products(
                     "availability": product.get("availability"),
                     "product_url": product.get("product_url"),
                     "image_url": product.get("image_url"),
-                    "source": [product.get("source", "exa_structured")],
+                    "source": [product.get("source", "serper")],
                     "address": product.get("store_address"),
                     "city": product.get("store_city"),
                     "state": product.get("store_state"),
                     "zipcode": product.get("store_zipcode") or zipcode
                 })
 
-        # Hybrid image extraction: Exa batch + HTML scraper fallback
-        async def derive_image_from_product_url(product_url: Optional[str], exa_image: Optional[str] = None) -> Optional[str]:
+        # Serper products already include images, so we use HTML scraper as fallback
+        async def derive_image_from_product_url(product_url: Optional[str], serper_image: Optional[str] = None) -> Optional[str]:
             """Derive image URL from product URL pattern (fallback method with validation)"""
-            # Priority 1: Use Exa's image field if available (most reliable)
-            if exa_image:
-                return exa_image
+            # Priority 1: Use Serper's image field if available (most reliable)
+            if serper_image:
+                return serper_image
             
             if not product_url:
                 return None
@@ -994,30 +986,11 @@ async def aggregate_products(
                         urls_needing_images.append(product_url)
                     url_to_offer_map[product_url].append((group_key, offer_idx))
 
-        # PRIORITY 1: Use Exa-provided images (already set from search results)
+        # PRIORITY 1: Serper products already include images (already set from search results)
         # (Already handled - images from search are already in offers)
 
-        # PRIORITY 2: Batch Exa get_contents for missing images
-        exa_image_results = {}
-        if urls_needing_images and exa_client.is_available():
-            logger.info(f"🖼️ Fetching {len(urls_needing_images)} images via Exa batch extraction...")
-            try:
-                exa_image_results = await exa_client.get_product_images_batch(
-                    urls_needing_images,
-                    max_concurrent=5  # Rate limit Exa API calls
-                )
-                logger.info(f"✅ Exa batch extraction complete: {sum(1 for v in exa_image_results.values() if v)}/{len(exa_image_results)} images found")
-            except Exception as e:
-                logger.warning(f"⚠️ Exa batch image extraction failed: {e}")
-
-        # Update offers with Exa images
-        for product_url, image_url in exa_image_results.items():
-            if image_url and product_url in url_to_offer_map:
-                for group_key, offer_idx in url_to_offer_map[product_url]:
-                    grouped[group_key]["offers"][offer_idx]["image_url"] = image_url
-
-        # PRIORITY 3: HTML scraper for remaining missing images
-        remaining_urls = [url for url in urls_needing_images if url not in exa_image_results or not exa_image_results[url]]
+        # PRIORITY 2: HTML scraper for remaining missing images
+        remaining_urls = urls_needing_images
         html_image_results = {}
         if remaining_urls:
             logger.info(f"🖼️ Fetching {len(remaining_urls)} images via HTML scraper...")
@@ -1174,7 +1147,7 @@ async def aggregate_products(
             """Fetch store locations for a retailer"""
             try:
                 store_name = to_store_name(store_id)
-                stores = await exa_client.search_stores_in_zipcode(store_name, zipcode)
+                stores = await serper_client.search_stores_in_zipcode(store_name, zipcode)
                 if stores:
                     # Use the first store found (closest match)
                     store_locations_cache[store_id] = stores[0]
@@ -1186,6 +1159,40 @@ async def aggregate_products(
         
         # Fetch store locations concurrently
         await asyncio.gather(*[fetch_store_locations(sid) for sid in considered_store_ids], return_exceptions=True)
+        
+        # Check availability for products with CHECK_STORE status
+        logger.info("🔍 Checking availability for products...")
+        try:
+            # Collect product URLs that need availability checking
+            urls_to_check = []
+            url_to_offer_map = {}  # Map product_url -> list of (group_key, offer_index)
+            
+            for group_key, group in grouped.items():
+                for offer_idx, offer in enumerate(group.get("offers", [])):
+                    product_url = offer.get("product_url")
+                    availability = offer.get("availability", "CHECK_STORE")
+                    if product_url and availability == "CHECK_STORE":
+                        if product_url not in url_to_offer_map:
+                            url_to_offer_map[product_url] = []
+                            urls_to_check.append(product_url)
+                        url_to_offer_map[product_url].append((group_key, offer_idx))
+            
+            if urls_to_check:
+                logger.info(f"🔍 Checking availability for {len(urls_to_check)} products...")
+                availability_results = await availability_checker.check_availability_batch(
+                    urls_to_check,
+                    max_concurrent=5
+                )
+                
+                # Update offers with availability results
+                for product_url, availability_status in availability_results.items():
+                    if product_url in url_to_offer_map:
+                        for group_key, offer_idx in url_to_offer_map[product_url]:
+                            grouped[group_key]["offers"][offer_idx]["availability"] = availability_status
+                
+                logger.info(f"✅ Updated availability for {len(availability_results)} products")
+        except Exception as e:
+            logger.warning(f"⚠️ Availability checking failed: {e}")
         
         # Transform to enhanced format
         async def transform_to_enhanced_format(grouped_results: Dict[str, Any], stores_considered: List[str], query: str, zipcode: str, store_locations: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -1283,6 +1290,22 @@ async def aggregate_products(
                     # Get store location details from cache
                     store_location = store_locations.get(store_id, {})
                     
+                    # Use actual store location data if available
+                    store_address = store_location.get("address") or offer.get("address")
+                    store_city = store_location.get("city") or offer.get("city")
+                    store_state = store_location.get("state") or offer.get("state")
+                    store_zipcode = store_location.get("zipcode") or offer.get("zipcode") or zipcode
+                    
+                    # Format full address if we have components
+                    if store_address and store_city and store_state:
+                        full_address = f"{store_address}, {store_city}, {store_state} {store_zipcode}"
+                    elif store_address:
+                        full_address = store_address
+                    elif store_city and store_state:
+                        full_address = f"{store_city}, {store_state} {store_zipcode}"
+                    else:
+                        full_address = None
+                    
                     # Extract retailer_store_id from store location
                     retailer_store_id = None
                     if store_location:
@@ -1306,7 +1329,7 @@ async def aggregate_products(
                         retailer=store_id,
                         retailer_store_id=retailer_store_id,
                         store_name=full_store_name,
-                        address=store_address,
+                        address=full_address or store_address,
                         city=store_city,
                         state=store_state,
                         zipcode=store_zipcode
@@ -1361,7 +1384,7 @@ async def aggregate_products(
             "zipcode": zipcode,
             "stores_considered": considered_store_ids,
             "results": list(grouped.values()),
-            "source": "exa_structured_aggregate"
+            "source": "serper_aggregate"
         }
         
         enhanced_response = await transform_to_enhanced_format(grouped, considered_store_ids, query, zipcode, store_locations_cache)
@@ -1518,7 +1541,7 @@ async def aggregate_products_stream(
             considered_store_ids = user_store_ids[:10] if user_store_ids else default_stores
         
         def to_store_name(store_id: str) -> str:
-            return exa_client.get_store_display_name(store_id)
+            return serper_client.get_store_display_name(store_id)
         
         async def generate_stream():
             """Generator that yields SSE events as stores complete"""
@@ -1526,8 +1549,8 @@ async def aggregate_products_stream(
                 # Send initial event
                 yield f"data: {json.dumps({'type': 'start', 'query': query, 'zipcode': zipcode, 'stores': considered_store_ids})}\n\n"
                 
-                if not exa_client.is_available():
-                    yield f"data: {json.dumps({'type': 'error', 'message': 'Exa client not available'})}\n\n"
+                if not serper_client.is_available():
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'Serper client not available'})}\n\n"
                     return
                 
                 # Search products across stores with streaming
@@ -1539,7 +1562,7 @@ async def aggregate_products_stream(
                             store_name = to_store_name(store_id)
                             logger.info(f"🔍 Searching {store_name} for '{query}' near {zipcode}")
                             
-                            products = await exa_client.search_products_structured(
+                            products = await serper_client.search_products_structured(
                                 query=query,
                                 store_name=store_name,
                                 zipcode=zipcode,

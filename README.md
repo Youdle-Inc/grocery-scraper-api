@@ -1,6 +1,6 @@
 # 🛒 Grocery Scraper API
 
-A powerful AI-powered grocery product discovery API that uses **Exa API** for intelligent product search with real URLs and images.
+A powerful grocery product discovery API that uses **Instacart Developer Platform API** for real-time product search with pricing, availability, and location-scoped results.
 
 **🌐 Live API**: https://grocery-scraper-api.vercel.app
 
@@ -26,16 +26,16 @@ See [TEST_CURL_COMMANDS.md](./TEST_CURL_COMMANDS.md) for comprehensive examples.
 
 ## ✨ Features
 
-### 🤖 AI-Powered Product Discovery
-- **Exa API Integration**: Uses advanced AI to find products across multiple stores
+### 🤖 Real-Time Product Discovery
+- **Instacart API Integration**: Real-time product search with location-scoped results
 - **Smart Product Matching**: Intelligent matching of product names and descriptions
 - **Real-time Store Discovery**: Find grocery stores in any location with detailed information
 
 ### 🔗 Real Product Data
-- **Real Product URLs**: Direct links to product pages from Exa's web search
-- **High-Quality Images**: Product images from web search results (800x800+ resolution)
-- **Live Pricing**: Current prices from various retailers
-- **Customer Ratings**: Real ratings and review counts
+- **Real Product URLs**: Direct links to Instacart marketplace product pages
+- **High-Quality Images**: Product images from Instacart (800x800+ resolution)
+- **Live Pricing**: Real-time prices from Instacart marketplace
+- **Real-Time Availability**: Current stock status (IN_STOCK, OUT_OF_STOCK, LOW_STOCK)
 - **Store-Specific Results**: Filter by Target, Walmart, Safeway, and more
 - **Multi-Store Comparison**: Compare products across multiple retailers in one request
 - **Location-Based Filtering**: Works with any ZIP code for accurate location-based results
@@ -53,15 +53,17 @@ See [TEST_CURL_COMMANDS.md](./TEST_CURL_COMMANDS.md) for comprehensive examples.
 
 ```
 ┌─────────────────┐    ┌─────────────────┐
-│   FastAPI App   │───▶│  Exa API        │
-│                 │    │  Web Search     │
-└─────────────────┘    └─────────────────┘
-         │                       │
-         ▼                       ▼
-┌─────────────────┐    ┌─────────────────┐
-│   Product       │    │   Store          │    │   Real URLs &   │
-│   Matching      │    │   Discovery      │    │   Images        │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
+│   FastAPI App   │───▶│  Instacart API   │
+│                 │    │  Developer       │
+└─────────────────┘    │  Platform       │
+         │              └─────────────────┘
+         ▼                       │
+┌─────────────────┐             ▼
+│   Product       │    ┌─────────────────┐
+│   Matching      │    │   Real-time      │
+│   & Ranking     │    │   Pricing &      │
+└─────────────────┘    │   Availability   │
+                        └─────────────────┘
 ```
 
 ## 🚀 Quick Start
@@ -78,12 +80,17 @@ pip install -r requirements.txt
 ### 2. Configure API Keys
 Create a `.env` file in the project root:
 ```bash
-# Required: Exa API Key (for real product URLs and images)
-EXA_API_KEY=your_exa_api_key_here
+# Required: Instacart Developer Platform API Key
+INSTACART_API_KEY=your_instacart_api_key_here
 
 # Optional: OpenAI API Key (for AI product validation)
 OPENAI_API_KEY=your_openai_api_key_here
 ```
+
+**Getting an Instacart API Key:**
+1. Sign up for [Instacart Developer Platform](https://docs.instacart.com/developer_platform_api/)
+2. Create an application and get your API key
+3. Add it to your `.env` file
 
 ### 3. Run the API
 ```bash

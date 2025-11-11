@@ -8,8 +8,9 @@ requests==2.31.0
 python-dotenv==1.0.0
 aiohttp==3.9.1
 
-# Exa Search API
-exa-py==1.0.8
+# Instacart Developer Platform API
+# Note: Instacart API uses standard HTTP requests via aiohttp
+# No additional SDK required - API key authentication via Bearer token
 
 # Caching
 redis[hiredis]==5.0.1
