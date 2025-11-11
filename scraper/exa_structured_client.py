@@ -144,8 +144,10 @@ class ExaStructuredClient:
         """Get domain for store name"""
         return self.STORE_DOMAINS.get(store_name.lower().strip())
     
-    def get_store_display_name(self, store_id: str) -> str:
+    def get_store_display_name(self, store_id: Optional[str]) -> str:
         """Get display name for store ID"""
+        if not store_id:
+            return "Unknown Store"
         store_id_lower = store_id.lower().strip()
         # Try exact match first
         display_name = self.STORE_DISPLAY_NAMES.get(store_id_lower)

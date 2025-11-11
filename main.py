@@ -855,15 +855,15 @@ async def aggregate_products(
                     )
                     
                     return {
-                                "store_id": store_id,
-                                "store_name": store_name,
-                        "products": products
+                        "store_id": store_id or "",
+                        "store_name": store_name or "",
+                        "products": products or []
                     }
                 except Exception as e:
                     logger.warning(f"Error fetching from {store_id}: {e}")
                     return {
-                    "store_id": store_id,
-                        "store_name": to_store_name(store_id),
+                        "store_id": store_id or "",
+                        "store_name": to_store_name(store_id) if store_id else "Unknown Store",
                         "products": []
                     }
 
@@ -874,8 +874,13 @@ async def aggregate_products(
         # Aggregate products by canonical product
         grouped = {}
         for result in store_results:
-            store_id = result["store_id"]
-            store_name = result["store_name"]
+            store_id = result.get("store_id") or ""
+            store_name = result.get("store_name") or ""
+            
+            # Skip if store_id is missing
+            if not store_id:
+                logger.warning(f"⚠️ Skipping result with missing store_id: {result}")
+                continue
             
             for product in result["products"]:
                 # Create grouping key
@@ -1237,8 +1242,13 @@ async def aggregate_products(
                 # Transform offers
                 enhanced_offers = []
                 for offer in offers:
-                    store_id = offer.get("store_id", "")
-                    store_name = offer.get("store_name", "")
+                    store_id = offer.get("store_id") or ""
+                    store_name = offer.get("store_name") or ""
+                    
+                    # Skip if store_id is missing
+                    if not store_id:
+                        logger.warning(f"⚠️ Skipping offer with missing store_id: {offer}")
+                        continue
                     
                     # Determine fulfillment options
                     fulfillment = []
@@ -1249,7 +1259,8 @@ async def aggregate_products(
                     
                     # Determine availability
                     availability = offer.get("availability", "CHECK_STORE")
-                    if availability and "stock" in availability.lower():
+                    # Ensure availability is a string before calling .lower()
+                    if availability and isinstance(availability, str) and "stock" in availability.lower():
                         if "out" in availability.lower():
                             availability = "OUT_OF_STOCK"
                         elif "low" in availability.lower():
@@ -1257,7 +1268,8 @@ async def aggregate_products(
                         else:
                             availability = "IN_STOCK"
                     else:
-                        availability = "CHECK_STORE"
+                        # If availability is not a string or doesn't contain "stock", default to CHECK_STORE
+                        availability = "CHECK_STORE" if isinstance(availability, str) and availability else "CHECK_STORE"
                     
                     # Determine prices
                     regular_price = None
