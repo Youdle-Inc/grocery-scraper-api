@@ -762,21 +762,8 @@ async def aggregate_products(
                 if limit and len(cached.get("results", [])) > limit:
                     cached["results"] = cached["results"][:limit]
                 
-                # Ensure insights are present (regenerate if missing)
-                if not cached.get("overview"):
-                    cached["overview"] = search_insights.generate_overview(
-                        query=query,
-                        results=cached.get("results", []),
-                        stores_considered=considered_store_ids,
-                        zipcode=zipcode
-                    )
-                
-                if not cached.get("follow_up_queries"):
-                    cached["follow_up_queries"] = search_insights.generate_follow_up_queries(
-                        query=query,
-                        results=cached.get("results", []),
-                        stores_considered=considered_store_ids
-                    )
+                # Skip insights generation for cached responses (improves performance)
+                # Overview and follow_up_queries removed for performance
                 
                 return cached
             else:
@@ -1467,22 +1454,9 @@ async def aggregate_products(
         if limit and len(enhanced_response.get("results", [])) > limit:
             enhanced_response["results"] = enhanced_response["results"][:limit]
         
-        # Generate insights for the final response (if not already present)
-        if not enhanced_response.get("overview"):
-            enhanced_response["overview"] = search_insights.generate_overview(
-                query=query,
-                results=enhanced_response.get("results", []),
-                stores_considered=considered_store_ids,
-                zipcode=zipcode
-            )
+        # Skip generating insights to improve response time
+        # Overview and follow_up_queries removed for performance
         
-        if not enhanced_response.get("follow_up_queries"):
-            enhanced_response["follow_up_queries"] = search_insights.generate_follow_up_queries(
-                query=query,
-                results=enhanced_response.get("results", []),
-                stores_considered=considered_store_ids
-            )
-
         # Cache the results (store enhanced format for future use)
         logger.info(f"cache_miss aggregate zip={zipcode} q='{query}' -> setting cache")
         await cache.set_json(cache_key, enhanced_response, ttl_seconds=60 * 15)

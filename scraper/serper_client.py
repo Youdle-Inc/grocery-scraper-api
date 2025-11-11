@@ -430,7 +430,8 @@ class SerperClient:
                         # Only skip obvious store locator pages
                         skip_patterns = [
                             "/store-locator", "/find-stores", "/sl/", "/location/", "/locator",
-                            "store locator", "find stores", "locations", "store directory"
+                            "store locator", "find stores", "locations", "store directory",
+                            "/blog/", "/q/", "/pb/", "/c/", "/browse/", "/search",  # Category/search pages
                         ]
                         
                         # Skip if link or title matches skip patterns
@@ -599,16 +600,36 @@ class SerperClient:
                                         state = state_match.group(1)
                         
                         # Skip if we didn't get a valid address (don't add generic store locator results)
-                        if not address and not city:
+                        # Require both address and city for quality
+                        if not address or not city:
                             continue
+                        
+                        # Validate address quality - require street number
+                        if address:
+                            # Check if address looks valid (has street number and name)
+                            if not re.search(r'^\d+\s+', address):
+                                continue  # Invalid address format, skip
+                        
+                        # Validate ZIP code matches (if extracted ZIP doesn't match requested, skip)
+                        # This helps filter out wrong addresses
+                        extracted_zip = None
+                        if state:
+                            zip_match = re.search(r'\b(\d{5})\b', snippet + " " + title)
+                            if zip_match:
+                                extracted_zip = zip_match.group(1)
+                                # If ZIP doesn't match requested ZIP (within reasonable distance), skip
+                                # Allow some flexibility (same city/area)
+                                if extracted_zip != zipcode:
+                                    # Still allow if city matches (might be nearby)
+                                    pass  # Keep it for now, but could be stricter
                         
                         store_location = {
                             "store_id": store_id_lower,
                             "store_name": self.get_store_display_name(store_id_lower),
                             "address": address,
                             "city": city,
-                            "state": state,
-                            "zipcode": zipcode,
+                            "state": state or "IL",  # Default to IL if not found
+                            "zipcode": extracted_zip or zipcode,  # Use extracted ZIP or requested
                             "phone": None,
                             "hours": None,
                             "services": ["in-store", "pickup"],
