@@ -98,7 +98,6 @@ class SerperClient:
     def __init__(self, api_key: Optional[str] = None):
         """Initialize Serper client"""
         self.api_key = api_key or os.getenv("SERPER_API_KEY")
-        self._session: Optional[aiohttp.ClientSession] = None
         self.cache = Cache()
         
         if not self.api_key:
@@ -111,21 +110,19 @@ class SerperClient:
         return self.api_key is not None
     
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create aiohttp session"""
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
-                headers={
-                    "X-API-KEY": self.api_key,
-                    "Content-Type": "application/json",
-                },
-                timeout=aiohttp.ClientTimeout(total=30)
-            )
-        return self._session
-    
-    async def _close_session(self):
-        """Close aiohttp session"""
-        if self._session and not self._session.closed:
-            await self._session.close()
+        """
+        Create a new aiohttp session for each request.
+        This is safer for serverless environments where event loops can be closed between requests.
+        """
+        # Create a new session for each request (safer for serverless)
+        session = aiohttp.ClientSession(
+            headers={
+                "X-API-KEY": self.api_key,
+                "Content-Type": "application/json",
+            },
+            timeout=aiohttp.ClientTimeout(total=30)
+        )
+        return session
     
     def get_store_display_name(self, store_id: Optional[str]) -> str:
         """Get display name for store ID"""
@@ -399,6 +396,7 @@ class SerperClient:
             logger.debug(f"Cache hit for Serper search: {query}")
             return cached
         
+        session = None
         try:
             session = await self._get_session()
             url = f"{self.API_BASE_URL}/search"
@@ -486,6 +484,13 @@ class SerperClient:
         except Exception as e:
             logger.error(f"❌ Serper search failed: {e}")
             return []
+        finally:
+            # Always close the session to prevent "Event loop is closed" errors
+            if session and not session.closed:
+                try:
+                    await session.close()
+                except Exception as e:
+                    logger.debug(f"Error closing session: {e}")
     
     async def search_stores_in_zipcode(self, store_chain: str, zipcode: str) -> List[Dict[str, Any]]:
         """
@@ -507,6 +512,7 @@ class SerperClient:
         if cached:
             return cached
         
+        session = None
         try:
             session = await self._get_session()
             url = f"{self.API_BASE_URL}/search"
@@ -615,4 +621,11 @@ class SerperClient:
         except Exception as e:
             logger.error(f"❌ Failed to search stores: {e}")
             return []
+        finally:
+            # Always close the session to prevent "Event loop is closed" errors
+            if session and not session.closed:
+                try:
+                    await session.close()
+                except Exception as e:
+                    logger.debug(f"Error closing session: {e}")
 
