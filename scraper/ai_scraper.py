@@ -146,9 +146,9 @@ class AIScraper:
                 '[class*="amount"]',
                 '[aria-label*="price"]',
                 '[data-automation-id*="price"]',
-                # Common patterns
-                'span:contains("$")',
-                'div:contains("$")',
+                # Common patterns (using new soup-contains syntax)
+                'span:-soup-contains("$")',
+                'div:-soup-contains("$")',
                 '[class*="pricing"]',
                 '[class*="purchase"]'
             ]
