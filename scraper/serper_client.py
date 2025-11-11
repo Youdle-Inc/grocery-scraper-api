@@ -114,6 +114,9 @@ class SerperClient:
         Create a new aiohttp session for each request.
         This is safer for serverless environments where event loops can be closed between requests.
         """
+        if not self.api_key:
+            raise ValueError("SERPER_API_KEY is not set. Please configure it in your environment variables.")
+        
         # Create a new session for each request (safer for serverless)
         session = aiohttp.ClientSession(
             headers={
@@ -480,6 +483,10 @@ class SerperClient:
                 else:
                     error_text = await response.text()
                     logger.warning(f"⚠️ Serper API error {response.status}: {error_text[:200]}")
+                    # Log API key status for debugging (without exposing the key)
+                    if response.status == 403:
+                        logger.error(f"❌ Serper API 403 Unauthorized - Check if SERPER_API_KEY is set in deployment environment")
+                        logger.error(f"❌ API key present: {bool(self.api_key)}, key length: {len(self.api_key) if self.api_key else 0}")
                     return []
         except Exception as e:
             logger.error(f"❌ Serper search failed: {e}")
@@ -617,6 +624,10 @@ class SerperClient:
                     return stores
                 else:
                     logger.warning(f"⚠️ Serper API error: {response.status}")
+                    # Log API key status for debugging (without exposing the key)
+                    if response.status == 403:
+                        logger.error(f"❌ Serper API 403 Unauthorized - Check if SERPER_API_KEY is set in deployment environment")
+                        logger.error(f"❌ API key present: {bool(self.api_key)}, key length: {len(self.api_key) if self.api_key else 0}")
                     return []
         except Exception as e:
             logger.error(f"❌ Failed to search stores: {e}")
