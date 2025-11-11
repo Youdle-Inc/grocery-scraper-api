@@ -97,12 +97,12 @@ class SerperClient:
     
     def __init__(self, api_key: Optional[str] = None):
         """Initialize Serper client"""
-        self.api_key = api_key or os.getenv("SERPER_API_KEY", "80ff8a83e123e4ae68792aef4a946ee7335bd8ca")
+        self.api_key = api_key or os.getenv("SERPER_API_KEY")
         self._session: Optional[aiohttp.ClientSession] = None
         self.cache = Cache()
         
         if not self.api_key:
-            logger.warning("⚠️ No SERPER_API_KEY found in environment")
+            logger.warning("⚠️ No SERPER_API_KEY found in environment - please set it in .env file")
         else:
             logger.info("✅ Serper client initialized")
     

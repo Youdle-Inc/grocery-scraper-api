@@ -20,11 +20,11 @@ load_dotenv()
 
 # Debug: Check if environment variables are loaded
 logger = logging.getLogger(__name__)
-serper_key = os.getenv("SERPER_API_KEY", "80ff8a83e123e4ae68792aef4a946ee7335bd8ca")
+serper_key = os.getenv("SERPER_API_KEY")
 if serper_key:
     logger.info(f"✅ SERPER_API_KEY loaded: {serper_key[:10]}...")
 else:
-    logger.warning("⚠️ SERPER_API_KEY not found in environment")
+    logger.warning("⚠️ SERPER_API_KEY not found in environment - please set it in .env file")
 
 # Import our scraper modules
 from scraper.models import StoreInfo
