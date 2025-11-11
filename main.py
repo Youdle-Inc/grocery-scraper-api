@@ -11,6 +11,7 @@ from typing import List, Optional, Dict, Any
 import asyncio
 import os
 import json
+import re
 from datetime import datetime
 import logging
 from dotenv import load_dotenv
@@ -1171,11 +1172,49 @@ async def aggregate_products(
                 for offer_idx, offer in enumerate(group.get("offers", [])):
                     product_url = offer.get("product_url")
                     availability = offer.get("availability", "CHECK_STORE")
+                    # Only check URLs that look like product pages from grocery stores
                     if product_url and availability == "CHECK_STORE":
-                        if product_url not in url_to_offer_map:
-                            url_to_offer_map[product_url] = []
-                            urls_to_check.append(product_url)
-                        url_to_offer_map[product_url].append((group_key, offer_idx))
+                        # Only allow URLs from known grocery store domains
+                        url_lower = product_url.lower()
+                        allowed_domains = [
+                            'target.com', 'walmart.com', 'kroger.com', 'costco.com',
+                            'albertsons.com', 'safeway.com', 'publix.com', 'heb.com',
+                            'aldi.us', 'samsclub.com', 'wholefoodsmarket.com', 'meijer.com',
+                            'wincofoods.com', 'bjs.com', 'dollargeneral.com', 'dollartree.com',
+                            'traderjoes.com', 'hy-vee.com', 'wegmans.com', 'sprouts.com',
+                            'gianteagle.com', 'amazon.com', 'origin-d8.wholefoodsmarket.com'
+                        ]
+                        
+                        # Check if URL is from an allowed grocery store domain
+                        is_grocery_store = any(domain in url_lower for domain in allowed_domains)
+                        
+                        if not is_grocery_store:
+                            continue  # Skip non-grocery store URLs
+                        
+                        # Skip non-product pages
+                        skip_patterns = ['/c/', '/browse/', '/q/', '/search', '/search?', '/tp/', '/blog/', '/article/', '/store-locator', '/find-stores']
+                        should_skip = False
+                        
+                        for pattern in skip_patterns:
+                            if pattern in url_lower:
+                                # Allow /ip/ if it has product ID pattern
+                                if pattern == '/ip/':
+                                    if not re.search(r'/ip/[^/]+/\d+', url_lower):
+                                        should_skip = True
+                                else:
+                                    should_skip = True
+                                break
+                        
+                        # Must have product indicators
+                        if not should_skip:
+                            product_indicators = ['/p/', '/product', '/item', '/ip/', '?id=', '/dp/', '/gp/product']
+                            has_product_indicator = any(indicator in url_lower for indicator in product_indicators)
+                            
+                            if has_product_indicator:
+                                if product_url not in url_to_offer_map:
+                                    url_to_offer_map[product_url] = []
+                                    urls_to_check.append(product_url)
+                                url_to_offer_map[product_url].append((group_key, offer_idx))
             
             if urls_to_check:
                 logger.info(f"🔍 Checking availability for {len(urls_to_check)} products...")
@@ -1394,13 +1433,14 @@ async def aggregate_products(
         original_count = len(enhanced_response.get("results", []))
         validated_results = enhanced_response.get("results", [])
         
-        # Only run AI validation if we have more than 10 products (to avoid slow API calls for small result sets)
-        if original_count > 10:
+        # Only run AI validation if we have more than 20 products (to avoid slow API calls)
+        # Use lower confidence threshold (0.4) to be less aggressive
+        if original_count > 20:
             logger.info(f"🔍 Validating {original_count} products...")
             validated_results = await product_validator.validate_batch(
                 products=enhanced_response.get("results", []),
                 original_query=query,
-                min_confidence=0.6
+                min_confidence=0.4  # Lower threshold - less aggressive filtering
             )
             
             # Filter invalid offers within each product

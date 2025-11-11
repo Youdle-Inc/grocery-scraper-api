@@ -52,9 +52,102 @@ class AvailabilityChecker:
         
         return results
     
+    def _is_product_url(self, url: str) -> bool:
+        """Check if URL is from a known grocery store domain"""
+        if not url:
+            return False
+        
+        url_lower = url.lower()
+        
+        # Only allow URLs from known grocery store domains
+        allowed_domains = [
+            'target.com',
+            'walmart.com',
+            'kroger.com',
+            'costco.com',
+            'albertsons.com',
+            'safeway.com',
+            'publix.com',
+            'heb.com',
+            'aldi.us',
+            'samsclub.com',
+            'wholefoodsmarket.com',
+            'meijer.com',
+            'wincofoods.com',
+            'bjs.com',
+            'dollargeneral.com',
+            'dollartree.com',
+            'traderjoes.com',
+            'hy-vee.com',
+            'wegmans.com',
+            'sprouts.com',
+            'gianteagle.com',
+            'amazon.com',  # Amazon Fresh
+            'amazon.com/alm',  # Amazon Fresh category
+            'origin-d8.wholefoodsmarket.com',  # Whole Foods product pages
+        ]
+        
+        # Check if URL is from an allowed grocery store domain
+        is_grocery_store = False
+        for domain in allowed_domains:
+            if domain in url_lower:
+                is_grocery_store = True
+                break
+        
+        if not is_grocery_store:
+            return False
+        
+        # Skip non-product pages (category pages, search pages, etc.)
+        skip_patterns = [
+            '/c/',  # Category pages
+            '/browse/',
+            '/q/',  # Query/search pages
+            '/search',
+            '/search?',
+            '/tp/',  # Topic pages
+            '/blog/',
+            '/article/',
+            '/store-locator',
+            '/find-stores',
+            '/locations',
+            '/sl/',  # Store locator
+        ]
+        
+        # Allow /ip/ if it looks like a product ID (has numbers)
+        if '/ip/' in url_lower:
+            # Check if it has a product ID pattern (numbers after /ip/)
+            if re.search(r'/ip/[^/]+/\d+', url_lower):
+                return True  # This is a product page
+            return False  # This is a category/topic page
+        
+        # Skip if it matches any skip pattern
+        for pattern in skip_patterns:
+            if pattern in url_lower:
+                return False
+        
+        # Must have product indicators
+        product_indicators = [
+            '/p/',  # Product pages
+            '/product',
+            '/item',
+            '/ip/',  # Item/product pages
+            '?id=',
+            '/dp/',  # Amazon product pages
+            '/gp/product',
+        ]
+        
+        has_product_indicator = any(indicator in url_lower for indicator in product_indicators)
+        
+        return has_product_indicator
+    
     async def _check_single_availability(self, product_url: str) -> str:
         """Check availability for a single product URL using multiple methods"""
         if not product_url:
+            return "CHECK_STORE"
+        
+        # Skip non-product URLs (YouTube, Reddit, blogs, etc.)
+        if not self._is_product_url(product_url):
+            logger.debug(f"⏭️ Skipping non-product URL: {product_url[:80]}...")
             return "CHECK_STORE"
         
         logger.info(f"🔍 Checking availability for: {product_url[:80]}...")

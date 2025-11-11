@@ -206,9 +206,48 @@ Respond in JSON format:
         """
         import asyncio
         
-        # Limit the number of products to validate (for performance)
-        # Validate top products first, skip if too many
-        products_to_validate = products[:50] if len(products) > 50 else products
+        # Pre-filter: Skip validation for products that already look good
+        # This reduces OpenAI API calls
+        products_to_validate = []
+        pre_validated = []
+        
+        for product in products:
+            # Quick check: if product has price, specific name, and valid URL, assume it's good
+            name = product.get("name", "").lower()
+            offers = product.get("offers", [])
+            
+            # Check if product looks good without AI validation
+            has_price = False
+            has_valid_url = False
+            name_is_specific = len(name) > 10 and not any(generic in name for generic in ["whole foods", "target", "walmart", "check store", "view stores"])
+            
+            for offer in offers:
+                price = offer.get("regular_price") or offer.get("sale_price")
+                if price and isinstance(price, (int, float)) and price > 0:
+                    has_price = True
+                
+                product_url = offer.get("product_url", "")
+                if product_url and len(product_url) > 20:
+                    # Check if URL looks like a product page
+                    url_lower = product_url.lower()
+                    if any(indicator in url_lower for indicator in ["/p/", "/product", "/item", "/ip/", "?id="]):
+                        # Skip non-product URLs
+                        if not any(skip in url_lower for skip in ["youtube.com", "reddit.com", "/blog/", "/q/", "/c/", "/browse/"]):
+                            has_valid_url = True
+            
+            # If product looks good, skip AI validation (assume valid)
+            if has_price and has_valid_url and name_is_specific:
+                pre_validated.append(product)
+            else:
+                products_to_validate.append(product)
+        
+        logger.info(f"✅ Pre-validated {len(pre_validated)} products (skipped AI validation)")
+        
+        # Limit the number of products to validate with AI (for performance)
+        products_to_validate = products_to_validate[:30] if len(products_to_validate) > 30 else products_to_validate
+        
+        if not products_to_validate:
+            return pre_validated
         
         # Create semaphore to limit concurrent API calls
         semaphore = asyncio.Semaphore(max_concurrent)
@@ -240,12 +279,16 @@ Respond in JSON format:
             else:
                 logger.debug(f"Filtered out product '{product.get('name')}': {validation['reasoning']}")
         
-        # Add remaining products that weren't validated (if we limited validation)
-        if len(products) > len(products_to_validate):
-            # Add remaining products without validation (assume valid)
-            validated_products.extend(products[len(products_to_validate):])
+        # Combine pre-validated and AI-validated products
+        all_validated = pre_validated + validated_products
         
-        return validated_products
+        # Add remaining products that weren't validated (if we limited validation)
+        remaining_count = len(products) - len(pre_validated) - len(products_to_validate)
+        if remaining_count > 0:
+            # Add remaining products without validation (assume valid)
+            all_validated.extend(products[len(pre_validated) + len(products_to_validate):])
+        
+        return all_validated
     
     def filter_invalid_offers(
         self,
