@@ -138,8 +138,8 @@ class SearchInsightsGenerator:
                     categories_found.add(category_path)
             
             # Extract attributes from name/description
-            name = result.get("name", "").lower()
-            desc = result.get("description", "").lower()
+            name = (result.get("name") or "").lower()
+            desc = (result.get("description") or "").lower()
             text = f"{name} {desc}"
             
             # Common attributes
@@ -165,7 +165,7 @@ class SearchInsightsGenerator:
         # 1. Related products in same category
         if categories_found:
             for category in list(categories_found)[:2]:
-                if category.lower() != query.lower():
+                if category and isinstance(category, str) and category.lower() != query.lower():
                     suggestions.append(f"{category.lower()}")
         
         # 2. Brand-specific queries
@@ -196,6 +196,8 @@ class SearchInsightsGenerator:
         unique_suggestions = []
         seen = set()
         for sug in suggestions:
+            if not sug or not isinstance(sug, str):
+                continue
             sug_lower = sug.lower().strip()
             if sug_lower and sug_lower not in seen and sug_lower != query.lower():
                 seen.add(sug_lower)

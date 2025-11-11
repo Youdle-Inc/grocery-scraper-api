@@ -189,7 +189,8 @@ Respond in JSON format:
         self,
         products: List[Dict[str, Any]],
         original_query: str,
-        min_confidence: float = 0.6
+        min_confidence: float = 0.6,
+        max_concurrent: int = 10
     ) -> List[Dict[str, Any]]:
         """
         Validate a batch of products and filter out invalid ones
@@ -198,14 +199,37 @@ Respond in JSON format:
             products: List of product dictionaries
             original_query: Original search query
             min_confidence: Minimum confidence threshold (0-1)
+            max_concurrent: Maximum concurrent validation calls (default: 10)
         
         Returns:
             List of validated products with validation metadata
         """
+        import asyncio
+        
+        # Limit the number of products to validate (for performance)
+        # Validate top products first, skip if too many
+        products_to_validate = products[:50] if len(products) > 50 else products
+        
+        # Create semaphore to limit concurrent API calls
+        semaphore = asyncio.Semaphore(max_concurrent)
+        
+        async def validate_with_limit(product: Dict[str, Any]) -> tuple:
+            async with semaphore:
+                validation = await self.validate_product(product, original_query)
+                return product, validation
+        
+        # Validate products concurrently
+        validation_tasks = [validate_with_limit(p) for p in products_to_validate]
+        validation_results = await asyncio.gather(*validation_tasks, return_exceptions=True)
+        
         validated_products = []
         
-        for product in products:
-            validation = await self.validate_product(product, original_query)
+        for result in validation_results:
+            if isinstance(result, Exception):
+                logger.warning(f"Validation error: {result}")
+                continue
+            
+            product, validation = result
             
             # Add validation metadata to product
             product["_validation"] = validation
@@ -215,6 +239,11 @@ Respond in JSON format:
                 validated_products.append(product)
             else:
                 logger.debug(f"Filtered out product '{product.get('name')}': {validation['reasoning']}")
+        
+        # Add remaining products that weren't validated (if we limited validation)
+        if len(products) > len(products_to_validate):
+            # Add remaining products without validation (assume valid)
+            validated_products.extend(products[len(products_to_validate):])
         
         return validated_products
     

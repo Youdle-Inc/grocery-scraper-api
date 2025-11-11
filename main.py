@@ -1367,29 +1367,38 @@ async def aggregate_products(
         enhanced_response = await transform_to_enhanced_format(grouped, considered_store_ids, query, zipcode, store_locations_cache)
 
         # Validate products - filter out generic/placeholder products
+        # OPTIMIZATION: Only validate if we have many results (skip for small result sets to improve speed)
         original_count = len(enhanced_response.get("results", []))
-        logger.info(f"🔍 Validating {original_count} products...")
-        validated_results = await product_validator.validate_batch(
-            products=enhanced_response.get("results", []),
-            original_query=query,
-            min_confidence=0.6
-        )
+        validated_results = enhanced_response.get("results", [])
         
-        # Filter invalid offers within each product
-        for product in validated_results:
-            if product.get("offers"):
-                product["offers"] = product_validator.filter_invalid_offers(product["offers"])
-        
-        # Remove products with no valid offers
-        validated_results = [p for p in validated_results if p.get("offers") and len(p.get("offers", [])) > 0]
+        # Only run AI validation if we have more than 10 products (to avoid slow API calls for small result sets)
+        if original_count > 10:
+            logger.info(f"🔍 Validating {original_count} products...")
+            validated_results = await product_validator.validate_batch(
+                products=enhanced_response.get("results", []),
+                original_query=query,
+                min_confidence=0.6
+            )
+            
+            # Filter invalid offers within each product
+            for product in validated_results:
+                if product.get("offers"):
+                    product["offers"] = product_validator.filter_invalid_offers(product["offers"])
+            
+            # Remove products with no valid offers
+            validated_results = [p for p in validated_results if p.get("offers") and len(p.get("offers", [])) > 0]
+            
+            # Log validation stats
+            filtered_count = original_count - len(validated_results)
+            if filtered_count > 0:
+                logger.info(f"✅ Filtered out {filtered_count} invalid/generic products")
+        else:
+            # For small result sets, just do basic filtering without AI validation
+            logger.info(f"⏩ Skipping AI validation for {original_count} products (using basic filtering)")
+            validated_results = [p for p in validated_results if p.get("offers") and len(p.get("offers", [])) > 0]
         
         # Update results with validated products
         enhanced_response["results"] = validated_results
-        
-        # Log validation stats
-        filtered_count = original_count - len(validated_results)
-        if filtered_count > 0:
-            logger.info(f"✅ Filtered out {filtered_count} invalid/generic products")
         
         # Apply limit to results
         if limit and len(enhanced_response.get("results", [])) > limit:
