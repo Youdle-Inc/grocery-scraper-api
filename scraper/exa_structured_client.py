@@ -96,7 +96,8 @@ class ExaStructuredClient:
         """Get context-specific prompt"""
         prompts = {
             "store_search": "Find grocery stores and supermarkets in the specified location. Focus on major chains and local stores.",
-            "product_search": "Search for specific grocery products and items. Focus on product details, prices, and availability.",
+            "product_search": "Search for specific grocery products and food items only. Focus on product details, prices, and availability. EXCLUDE gift cards, gift certificates, prepaid cards, and non-food items. Only return actual food products.",
+            "price_comparison": "Search for specific grocery products and food items for price comparison. Focus on product details, prices, and availability. EXCLUDE gift cards, gift certificates, prepaid cards, and non-food items. Only return actual food products.",
             "generic": "Search for grocery-related information including stores, products, and services."
         }
         return prompts.get(context, prompts["generic"])
@@ -150,6 +151,10 @@ class ExaStructuredClient:
                 # For unknown zipcodes, use explicit zipcode location filtering
                 # Exa understands zipcodes well, so this should still work effectively
                 base_query = f"{base_query} location zipcode {zipcode} in {zipcode}"
+        
+        # Explicitly exclude gift cards and non-food items
+        # Exa supports exclusion with minus sign
+        base_query = f"{base_query} -gift card -giftcard -gift-card -non-food -non food"
 
         return base_query
     
@@ -188,6 +193,12 @@ class ExaStructuredClient:
         4. Availability must be current status
         5. Ratings must be 1-5 scale
         6. If information is incomplete, mark confidence level and provide best available data
+        
+        CRITICAL EXCLUSIONS:
+        - DO NOT include gift cards, gift certificates, prepaid cards, or e-gift cards
+        - DO NOT include category pages or brand pages (e.g., "STK Steakhouse products at Target")
+        - ONLY return actual food products and grocery items
+        - Exclude non-food items like electronics, clothing, toys, etc.
         """
         
         return combined_prompt + validation_instructions
@@ -389,8 +400,28 @@ class ExaStructuredClient:
         ]
 
         url_lower = url.lower()
+        title_lower = title.lower() if title else ""
+        
         for pattern in exclude_patterns:
-            if pattern in url_lower or pattern in title:
+            if pattern in url_lower or pattern in title_lower:
+                return False
+        
+        # Filter out gift cards and non-food items
+        gift_card_patterns = [
+            'gift card',
+            'giftcard',
+            'gift-card',
+            '/gift',
+            'egift',
+            'e-gift',
+            'digital gift',
+            'prepaid',
+            'reloadable',
+        ]
+        
+        for pattern in gift_card_patterns:
+            if pattern in url_lower or pattern in title_lower:
+                logger.debug(f"Filtering out gift card: {title[:60]}... (URL: {url[:60]}...)")
                 return False
 
         # Check for product page indicators
@@ -452,6 +483,35 @@ class ExaStructuredClient:
 
                     # Extract product data (skip async image extraction during batch for performance)
                     product = await self._extract_product_data(result, store_name, zipcode, extract_images_async=False)
+                    
+                    # Filter out gift cards and non-food items based on product name/content
+                    if product:
+                        product_name = product.get("name", "").lower()
+                        product_url_lower = product.get("product_url", "").lower()
+                        
+                        # Check for gift card indicators in product name or URL
+                        gift_card_keywords = [
+                            'gift card', 'giftcard', 'gift-card', 'egift', 'e-gift',
+                            'digital gift', 'prepaid', 'reloadable', 'gift certificate'
+                        ]
+                        
+                        # Check for category/brand pages (not specific products)
+                        category_page_indicators = [
+                            'products at', 'products in', 'products from',
+                            'at target', 'at walmart', 'at kroger',
+                            'shop all', 'browse', 'view all',
+                            'brand shop', 'brand store'
+                        ]
+                        
+                        # Skip gift cards
+                        if any(keyword in product_name or keyword in product_url_lower for keyword in gift_card_keywords):
+                            logger.debug(f"Filtering out gift card product: {product.get('name', 'Unknown')[:50]}...")
+                            continue
+                        
+                        # Skip category/brand pages (e.g., "STK Steakhouse products at Target")
+                        if any(indicator in product_name for indicator in category_page_indicators):
+                            logger.debug(f"Filtering out category page: {product.get('name', 'Unknown')[:50]}...")
+                            continue
                     
                     # If no image found and we have a product URL, try async extraction
                     # This is important because search_and_contents doesn't return image_links

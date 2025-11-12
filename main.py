@@ -169,6 +169,27 @@ async def startup_event():
     logger.info(f"🔍 Exa available: {exa_client.is_available()}")
     logger.info(f"🔑 EXA_API_KEY loaded: {bool(os.getenv('EXA_API_KEY'))}")
     logger.info(f"🌍 Environment: {os.getenv('ENVIRONMENT', 'development')}")
+    
+    # Set up exception handler for background tasks
+    loop = asyncio.get_event_loop()
+    old_exception_handler = loop.get_exception_handler()
+    
+    def exception_handler(loop, context):
+        """Custom exception handler that suppresses harmless httpx cleanup errors"""
+        exception = context.get('exception')
+        if exception and isinstance(exception, RuntimeError):
+            if "Event loop is closed" in str(exception):
+                # Suppress httpx cleanup errors - they're harmless
+                logger.debug(f"Suppressed cleanup error: {exception}")
+                return
+        
+        # Call the default handler for other exceptions
+        if old_exception_handler:
+            old_exception_handler(loop, context)
+        else:
+            loop.default_exception_handler(context)
+    
+    loop.set_exception_handler(exception_handler)
 
 from fastapi.openapi.docs import get_redoc_html
 
@@ -647,7 +668,7 @@ async def search_products(
     - Building shopping lists with optimal store selection
 
     **Available Stores:**
-    target, walmart, whole_foods, kroger, aldi, costco, trader_joes, sams_club, safeway
+    target, walmart, whole_foods, kroger, aldi, costco, trader_joes, sams_club, safeway, albertsons, publix, heb, wegmans
     """,
 )
 async def aggregate_products(
@@ -704,6 +725,10 @@ async def aggregate_products(
                 "costco": "Costco",
                 "aldi": "ALDI",
                 "safeway": "Safeway",
+                "albertsons": "Albertsons",
+                "publix": "Publix",
+                "heb": "H-E-B",
+                "wegmans": "Wegmans",
             }
             return mapping.get(store_id, store_id.replace("_", " ").title())
 
