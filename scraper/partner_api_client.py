@@ -9,6 +9,30 @@ from .walmart_api_client import WalmartAPIClient
 
 logger = logging.getLogger(__name__)
 
+def is_chicago_area_zipcode(zipcode: Optional[str]) -> bool:
+    """
+    Check if a zipcode is in the Chicago metropolitan area (Illinois)
+    Mariano's operates exclusively in Illinois, primarily in the Chicago metropolitan area
+    
+    Chicago area zip codes:
+    - 60000-60999: Northern suburbs (Cook, Lake, DuPage, Kane, McHenry counties)
+    - 60601-60699: Chicago city
+    """
+    if not zipcode or len(zipcode) != 5:
+        return False
+    
+    try:
+        zip_int = int(zipcode)
+        # Chicago city: 60601-60699
+        if 60601 <= zip_int <= 60699:
+            return True
+        # Northern suburbs: 60000-60999
+        if 60000 <= zip_int <= 60999:
+            return True
+        return False
+    except ValueError:
+        return False
+
 class PartnerAPIClient:
     """Unified client that uses official partner APIs when available"""
     
@@ -37,6 +61,9 @@ class PartnerAPIClient:
         if store_id_lower == "target":
             return self.target_client.is_available()
         elif store_id_lower == "kroger":
+            return self.kroger_client.is_available()
+        elif store_id_lower == "marianos" or store_id_lower == "mariano's":
+            # Mariano's uses Kroger API (same parent company)
             return self.kroger_client.is_available()
         elif store_id_lower == "walmart":
             return self.walmart_client.is_available()
@@ -80,17 +107,40 @@ class PartnerAPIClient:
                     logger.warning("Target API requires zipcode for store lookup")
                     return []
             
-            elif store_id_lower == "kroger" and self.kroger_client.is_available():
-                logger.info(f"🛒 Using Kroger official API for '{query}'")
+            elif (store_id_lower == "kroger" or store_id_lower == "marianos" or store_id_lower == "mariano's") and self.kroger_client.is_available():
+                # Check if this should be Mariano's (Chicago area) or Kroger
+                is_marianos = False
+                if store_id_lower == "marianos" or store_id_lower == "mariano's":
+                    is_marianos = True
+                elif store_id_lower == "kroger" and zipcode and is_chicago_area_zipcode(zipcode):
+                    # If searching Kroger in Chicago area, use Mariano's branding
+                    is_marianos = True
+                    logger.info(f"📍 Chicago area zipcode detected ({zipcode}), using Mariano's branding")
+                
+                if is_marianos:
+                    logger.info(f"🛒 Using Kroger API (Mariano's branding) for '{query}' in Chicago area")
+                else:
+                    logger.info(f"🛒 Using Kroger official API for '{query}'")
+                
                 if zipcode:
                     products = await self.kroger_client.search_products_multiple_stores(
                         query=query,
                         zipcode=zipcode,
                         limit_per_store=limit // 3  # Distribute across stores
                     )
+                    
+                    # If Mariano's, update store_name in products
+                    if is_marianos:
+                        for product in products:
+                            # Update store_name to Mariano's
+                            if product.get("store_name") == "Kroger":
+                                product["store_name"] = "Mariano's"
+                            # Also update any chain references
+                            if "chain" in product and product["chain"] == "Kroger":
+                                product["chain"] = "Mariano's"
                 else:
                     # Without zipcode, we can't use Kroger API (requires store_id)
-                    logger.warning("Kroger API requires zipcode for store lookup")
+                    logger.warning("Kroger/Mariano's API requires zipcode for store lookup")
                     return []
             
             elif store_id_lower == "walmart" and self.walmart_client.is_available():
@@ -107,7 +157,14 @@ class PartnerAPIClient:
                 return []
             
             # Normalize product format to match Exa format
-            return self._normalize_product_format(products, store_id)
+            # Handle Mariano's store_id mapping
+            normalized_store_id = store_id.lower()
+            if normalized_store_id == "marianos" or normalized_store_id == "mariano's":
+                normalized_store_id = "marianos"  # Use consistent format
+            elif normalized_store_id == "kroger" and zipcode and is_chicago_area_zipcode(zipcode):
+                normalized_store_id = "marianos"  # Map Kroger in Chicago to Mariano's
+            
+            return self._normalize_product_format(products, normalized_store_id)
                 
         except Exception as e:
             logger.error(f"Error using partner API for {store_id}: {e}", exc_info=True)
@@ -116,12 +173,26 @@ class PartnerAPIClient:
     def _normalize_product_format(self, products: List[Dict[str, Any]], store_id: str) -> List[Dict[str, Any]]:
         """Normalize product format from partner APIs to match Exa format"""
         normalized = []
+        # Map store_id to display name
+        store_display_name = store_id
+        if store_id.lower() == "marianos":
+            store_display_name = "Mariano's"
+        elif store_id.lower() == "kroger":
+            store_display_name = "Kroger"
+        elif store_id.lower() == "target":
+            store_display_name = "Target"
+        elif store_id.lower() == "walmart":
+            store_display_name = "Walmart"
+        
         for product in products:
             # Convert source from list to string if needed
             if isinstance(product.get("source"), list):
                 product["source"] = ", ".join(product["source"]) if product["source"] else "partner_api"
             elif not product.get("source"):
                 product["source"] = "partner_api"
+            
+            # Use product's store_name if available, otherwise use store_display_name
+            product_store_name = product.get("store_name") or store_display_name
             
             # Ensure all required fields exist
             normalized_product = {
@@ -134,7 +205,7 @@ class PartnerAPIClient:
                 "availability": product.get("availability", "Check Store"),
                 "product_url": product.get("product_url"),
                 "image_url": product.get("image_url"),
-                "store_name": product.get("store_name", store_id),
+                "store_name": product_store_name,
                 "store_zipcode": product.get("store_zipcode"),
                 "description": product.get("description"),
                 "category": product.get("category"),

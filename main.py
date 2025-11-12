@@ -510,10 +510,20 @@ async def search_products(
                 "target": "target",
                 "walmart": "walmart",
                 "kroger": "kroger",
+                "marianos": "marianos",
+                "mariano's": "marianos",
+                "mariano": "marianos",
                 "whole_foods": "whole_foods",
                 "whole foods": "whole_foods",
             }
             store_id = store_id_map.get(store_id, store_id)
+            
+            # If searching Kroger in Chicago area, map to Mariano's
+            if store_id == "kroger" and zipcode:
+                from scraper.partner_api_client import is_chicago_area_zipcode
+                if is_chicago_area_zipcode(zipcode):
+                    store_id = "marianos"
+                    logger.info(f"📍 Chicago area zipcode ({zipcode}) detected, mapping Kroger to Mariano's")
             
             if partner_api_client.has_partner_api(store_id):
                 logger.info(f"🎯 Using official {store_name} API for '{query}'")
@@ -748,6 +758,8 @@ async def aggregate_products(
                 "sams_club": "Sam's Club",
                 "trader_joes": "Trader Joe's",
                 "kroger": "Kroger",
+                "marianos": "Mariano's",
+                "mariano's": "Mariano's",
                 "target": "Target",
                 "walmart": "Walmart",
                 "costco": "Costco",
