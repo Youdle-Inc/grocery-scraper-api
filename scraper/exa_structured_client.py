@@ -812,7 +812,7 @@ class ExaStructuredClient:
                 "price": price,
                 "currency": "USD",
                 "quantity": quantity,
-                "availability": "Check Store",
+                "availability": availability,
                 "image_url": image_url,
                 "product_url": url,
                 "description": description,
