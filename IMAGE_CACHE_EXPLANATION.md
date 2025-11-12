@@ -158,3 +158,4 @@ stats = await image_cache.get_stats()
 - [ ] Cache warming (pre-populate common products)
 - [ ] Cache analytics (track hit rates)
 
+

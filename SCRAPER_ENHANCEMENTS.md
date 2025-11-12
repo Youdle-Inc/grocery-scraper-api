@@ -187,3 +187,4 @@ for product in products:
 - Some stores may require authentication or have anti-scraping measures
 - HTML structure may change over time - extractors should be updated accordingly
 
+

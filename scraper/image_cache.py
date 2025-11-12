@@ -227,3 +227,4 @@ class ProductImageCache:
             logger.warning(f"Failed to get cache stats: {e}")
             return {'total_cached': 0, 'similarity_threshold': self.similarity_threshold}
 
+

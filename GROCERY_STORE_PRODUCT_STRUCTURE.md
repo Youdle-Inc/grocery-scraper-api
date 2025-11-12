@@ -314,3 +314,4 @@ class ProductExtractor:
 5. Add validation and error handling
 6. Optimize extraction performance
 
+

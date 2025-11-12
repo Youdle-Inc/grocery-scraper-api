@@ -339,12 +339,23 @@ class ExaStructuredClient:
             # Add domain filter if store specified
             if store_name:
                 domain = self._get_store_domain(store_name)
+                logger.info(f"🔍 Store name: '{store_name}' -> Domain: '{domain}'")
                 if domain:
-                    search_options["include_domains"] = [domain]
+                    # Include both www and non-www versions for better coverage
+                    domains_to_include = [domain]
+                    if domain.startswith("www."):
+                        domains_to_include.append(domain[4:])  # Also include without www
+                    elif not domain.startswith("www."):
+                        domains_to_include.append(f"www.{domain}")  # Also include with www
+                    search_options["include_domains"] = domains_to_include
+                    logger.info(f"✅ Using domain filter: {domains_to_include}")
+                else:
+                    logger.warning(f"⚠️ No domain found for store_name: '{store_name}'")
 
             # Execute search - OPTIMIZED: Use async executor with timeout
             try:
                 logger.info(f"📡 Calling Exa API with query: {search_query}")
+                logger.debug(f"📋 Search options: {search_options}")
                 # Add timeout to prevent hanging
                 response = await asyncio.wait_for(
                     asyncio.get_event_loop().run_in_executor(
@@ -359,6 +370,13 @@ class ExaStructuredClient:
                     return []
                 
                 logger.info(f"📥 Exa response received: {type(response)}")
+                
+                # Log raw results count before processing
+                raw_results = getattr(response, "results", [])
+                logger.info(f"📊 Exa returned {len(raw_results)} raw results for {store_name}")
+                if len(raw_results) == 0:
+                    logger.warning(f"⚠️ Zero results from Exa for {store_name} with query: {search_query}")
+                    logger.warning(f"⚠️ Search options were: {search_options}")
                 
                 # Process results
                 products = await self._process_search_results(response, store_name, zipcode)

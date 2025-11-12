@@ -32,6 +32,7 @@ from scraper.location_service import LocationService
 from scraper.cache import Cache, stores_key, products_key
 from scraper.exa_structured_client import ExaStructuredClient, set_image_cache
 from scraper.image_cache import ProductImageCache
+from scraper.partner_api_client import PartnerAPIClient
 from scraper.models import (
     HealthResponse,
     StoresResponse,
@@ -156,6 +157,7 @@ app.add_middleware(
 # Initialize services
 cache = Cache()
 exa_client = ExaStructuredClient()
+partner_api_client = PartnerAPIClient()  # Official partner APIs (Target, Kroger, Walmart)
 
 # Initialize image cache with fuzzy matching
 image_cache = ProductImageCache(cache)
@@ -174,6 +176,12 @@ async def startup_event():
     logger.info(f"🔍 Exa available: {exa_client.is_available()}")
     logger.info(f"🔑 EXA_API_KEY loaded: {bool(os.getenv('EXA_API_KEY'))}")
     logger.info(f"🌍 Environment: {os.getenv('ENVIRONMENT', 'development')}")
+    
+    # Log partner API status
+    logger.info("📡 Partner API Status:")
+    logger.info(f"  🎯 Target API: {'✅ Available' if partner_api_client.target_client.is_available() else '❌ Not configured'}")
+    logger.info(f"  🛒 Kroger API: {'✅ Available' if partner_api_client.kroger_client.is_available() else '❌ Not configured'}")
+    logger.info(f"  🏪 Walmart API: {'✅ Available' if partner_api_client.walmart_client.is_available() else '❌ Not configured'}")
     
     # Set up exception handler for background tasks
     loop = asyncio.get_event_loop()
@@ -775,25 +783,45 @@ async def aggregate_products(
                     store_name = to_store_name(store_id)
                     logger.info(f"Searching {store_name} for '{query}' near {zipcode}")
                     
-                    # Optimized: Reduced num_results and text extraction for faster response
-                    products = await exa_client.search_products_structured(
-                        query=query,
-                        store_name=store_name,
-                        zipcode=zipcode,
-                        num_results=8,  # Reduced from 10 to 8 for faster processing
-                        include_location=False,  # Skip location fetching for speed (can be added later if needed)
-                        context="price_comparison"  # Use price comparison context for aggregate
-                    )
+                    products = []
+                    
+                    # Try official partner API first if available
+                    if partner_api_client.has_partner_api(store_id):
+                        logger.info(f"🎯 Using official {store_name} API")
+                        products = await partner_api_client.search_products(
+                            store_id=store_id,
+                            query=query,
+                            zipcode=zipcode,
+                            limit=8
+                        )
+                        
+                        # If partner API returned results, use them
+                        if products:
+                            logger.info(f"✅ {store_name} partner API returned {len(products)} products")
+                        else:
+                            logger.info(f"⚠️ {store_name} partner API returned no results, falling back to Exa")
+                    
+                    # Fallback to Exa if no partner API or partner API returned no results
+                    if not products:
+                        logger.info(f"🔍 Using Exa API for {store_name}")
+                        products = await exa_client.search_products_structured(
+                            query=query,
+                            store_name=store_name,
+                            zipcode=zipcode,
+                            num_results=8,  # Reduced from 10 to 8 for faster processing
+                            include_location=False,  # Skip location fetching for speed (can be added later if needed)
+                            context="price_comparison"  # Use price comparison context for aggregate
+                        )
                     
                     return {
-                                "store_id": store_id,
-                                "store_name": store_name,
+                        "store_id": store_id,
+                        "store_name": store_name,
                         "products": products
                     }
                 except Exception as e:
-                    logger.warning(f"Error fetching from {store_id}: {e}")
+                    logger.warning(f"Error fetching from {store_id}: {e}", exc_info=True)
                     return {
-                    "store_id": store_id,
+                        "store_id": store_id,
                         "store_name": to_store_name(store_id),
                         "products": []
                     }
@@ -801,7 +829,7 @@ async def aggregate_products(
         # Fetch from all stores concurrently with timeout
         tasks = [fetch_store_products(sid) for sid in considered_store_ids]
         # Use asyncio.wait_for with timeout to prevent hanging
-        async def fetch_with_timeout(task, timeout=15):
+        async def fetch_with_timeout(task, timeout=30):  # Increased timeout for partner APIs (Kroger can be slow)
             try:
                 return await asyncio.wait_for(task, timeout=timeout)
             except asyncio.TimeoutError:
