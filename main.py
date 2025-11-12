@@ -804,6 +804,15 @@ async def aggregate_products(
         tasks = [fetch_store_products(sid) for sid in considered_store_ids]
         store_results = await asyncio.gather(*tasks, return_exceptions=False)
 
+        # Log results from each store
+        total_products = 0
+        for result in store_results:
+            product_count = len(result.get("products", []))
+            total_products += product_count
+            logger.info(f"📦 {result.get('store_name', 'Unknown')}: {product_count} products found")
+        
+        logger.info(f"📊 Total products found across all stores: {total_products}")
+
         # Aggregate products by canonical product
         grouped = {}
         for result in store_results:
@@ -861,6 +870,8 @@ async def aggregate_products(
                     "state": product.get("store_state"),
                     "zipcode": product.get("store_zipcode") or zipcode
                 })
+
+        logger.info(f"📊 Grouped {len(grouped)} unique products from {total_products} total products")
 
         # Hybrid image extraction: Exa batch + HTML scraper fallback
         async def derive_image_from_product_url(product_url: Optional[str], exa_image: Optional[str] = None) -> Optional[str]:

@@ -7,6 +7,8 @@ Uses Exa's search and contents APIs to get structured product information.
 import asyncio
 import os
 import logging
+import re
+import json
 from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
 from exa_py import Exa
@@ -655,6 +657,148 @@ class ExaStructuredClient:
         
         return None
     
+    async def _get_availability_from_exa(self, url: Optional[str]) -> Optional[str]:
+        """
+        Get availability status from Exa using structured extraction.
+        This makes an API call to Exa to get structured availability data.
+        
+        Returns availability string or None if extraction fails.
+        """
+        if not url or not self.is_available():
+            return None
+        
+        try:
+            # Define schema focused on availability
+            availability_schema = {
+                "type": "object",
+                "properties": {
+                    "availability": {
+                        "type": "string",
+                        "description": "Stock availability status. Extract exact status from page: 'in stock', 'out of stock', 'sold out', 'available', 'unavailable', 'low stock', 'limited availability', 'check store', 'available for pickup', 'available for delivery'. Be precise - look for stock status indicators, 'add to cart' buttons (usually means in stock), 'out of stock' messages, or inventory warnings."
+                    }
+                },
+                "required": ["availability"]
+            }
+            
+            response = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self._client.get_contents(
+                    [url],
+                    text=True,
+                    summary={
+                        "query": "Extract the product availability/stock status from this product page. Look for indicators like 'in stock', 'out of stock', 'add to cart', 'sold out', 'available for pickup', 'available for delivery', or inventory warnings. Return the exact availability status.",
+                        "schema": availability_schema
+                    }
+                )
+            )
+            
+            if response and response.results:
+                result = response.results[0]
+                if hasattr(result, "summary") and result.summary:
+                    # Parse the summary JSON to get availability
+                    try:
+                        summary_data = json.loads(result.summary)
+                        exa_availability = summary_data.get("availability", "").strip()
+                        if exa_availability:
+                            # Normalize the availability value
+                            exa_avail_lower = exa_availability.lower()
+                            if "out" in exa_avail_lower or "sold out" in exa_avail_lower or "unavailable" in exa_avail_lower:
+                                return "Out of Stock"
+                            elif "low" in exa_avail_lower or "limited" in exa_avail_lower:
+                                return "Low Stock"
+                            elif "in stock" in exa_avail_lower or "available" in exa_avail_lower:
+                                return "In Stock"
+                            else:
+                                return exa_availability  # Return as-is if it's a valid status
+                    except (json.JSONDecodeError, AttributeError):
+                        # If summary is not JSON, try to extract from text
+                        pass
+            
+            return None
+        except Exception as e:
+            logger.debug(f"Failed to get availability from Exa for {url[:80]}...: {e}")
+            return None
+    
+    def _extract_availability(self, text: str, title: str, url: Optional[str] = None) -> str:
+        """
+        Extract product availability status from page text content.
+        
+        Returns one of: "In Stock", "Out of Stock", "Low Stock", "Check Store"
+        """
+        if not text:
+            return "Check Store"
+        
+        text_lower = text.lower()
+        title_lower = title.lower() if title else ""
+        combined_text = f"{text_lower} {title_lower}"
+        
+        # Patterns for out of stock
+        out_of_stock_patterns = [
+            r'out\s+of\s+stock',
+            r'currently\s+unavailable',
+            r'not\s+available',
+            r'unavailable',
+            r'sold\s+out',
+            r'no\s+longer\s+available',
+            r'discontinued',
+            r'temporarily\s+unavailable',
+            r'backorder',
+            r'pre-order',
+        ]
+        
+        # Patterns for in stock
+        in_stock_patterns = [
+            r'in\s+stock',
+            r'available\s+now',
+            r'ready\s+to\s+ship',
+            r'add\s+to\s+cart',  # Usually means in stock
+            r'buy\s+now',
+            r'ships\s+from',
+            r'available\s+for',
+        ]
+        
+        # Patterns for low stock
+        low_stock_patterns = [
+            r'low\s+stock',
+            r'only\s+\d+\s+left',
+            r'few\s+left',
+            r'limited\s+availability',
+            r'limited\s+stock',
+            r'only\s+\d+\s+in\s+stock',
+        ]
+        
+        # Check for out of stock first (highest priority)
+        for pattern in out_of_stock_patterns:
+            if re.search(pattern, combined_text, re.IGNORECASE):
+                return "Out of Stock"
+        
+        # Check for low stock
+        for pattern in low_stock_patterns:
+            if re.search(pattern, combined_text, re.IGNORECASE):
+                return "Low Stock"
+        
+        # Check for in stock
+        for pattern in in_stock_patterns:
+            if re.search(pattern, combined_text, re.IGNORECASE):
+                return "In Stock"
+        
+        # Store-specific availability indicators
+        if url:
+            url_lower = url.lower()
+            # Target-specific patterns
+            if "target.com" in url_lower:
+                # Target often shows "Check Store" or "Available for pickup/delivery"
+                if any(phrase in text_lower for phrase in ["pickup", "delivery", "shipping"]):
+                    return "In Stock"
+            
+            # Walmart-specific patterns
+            if "walmart.com" in url_lower:
+                if any(phrase in text_lower for phrase in ["add to cart", "free pickup", "free delivery"]):
+                    return "In Stock"
+        
+        # Default: Check Store (when we can't determine)
+        return "Check Store"
+    
     async def _extract_product_data(
         self,
         result: Any,
@@ -804,6 +948,40 @@ class ExaStructuredClient:
             else:
                 # Fallback to text extraction
                 description = self._extract_product_description(text, title)
+            
+            # Extract availability from Exa (preferred) or fallback to text extraction
+            availability = None
+            
+            # Priority 1: Try to get availability from Exa summary if available
+            if exa_summary:
+                try:
+                    # Check if summary contains availability info
+                    summary_lower = exa_summary.lower()
+                    if any(phrase in summary_lower for phrase in ["in stock", "out of stock", "available", "unavailable", "sold out"]):
+                        # Try to extract from summary
+                        availability = self._extract_availability(exa_summary, title, url)
+                        if availability and availability != "Check Store":
+                            logger.debug(f"✅ Got availability from Exa summary: {availability}")
+                except Exception as e:
+                    logger.debug(f"Failed to extract availability from Exa summary: {e}")
+            
+            # Priority 2: If not found, try to get from Exa structured extraction (async call)
+            if not availability or availability == "Check Store":
+                try:
+                    exa_availability = await self._get_availability_from_exa(url)
+                    if exa_availability:
+                        availability = exa_availability
+                        logger.debug(f"✅ Got availability from Exa structured extraction: {availability}")
+                except Exception as e:
+                    logger.debug(f"Failed to get availability from Exa: {e}")
+            
+            # Priority 3: Fallback to text extraction
+            if not availability or availability == "Check Store":
+                try:
+                    availability = self._extract_availability(text, title, url)
+                except Exception as e:
+                    logger.debug(f"Failed to extract availability from text: {e}")
+                    availability = "Check Store"
             
             # Build product object
             product = {
