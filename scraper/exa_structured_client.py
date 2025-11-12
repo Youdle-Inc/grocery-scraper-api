@@ -14,9 +14,20 @@ from dotenv import load_dotenv
 from exa_py import Exa
 # Prompt templates removed - using inline prompts
 
+# Import store-specific extractors
+from scraper.store_extractors import get_extractor
+
 load_dotenv()
 exa = Exa(os.getenv("EXA_API_KEY"))
 logger = logging.getLogger(__name__)
+
+# Image cache will be initialized in main.py and passed in
+_image_cache = None
+
+def set_image_cache(cache):
+    """Set the image cache instance"""
+    global _image_cache
+    _image_cache = cache
 
 
 class ExaStructuredClient:
@@ -311,14 +322,15 @@ class ExaStructuredClient:
             
             logger.info(f"🔍 Searching Exa for: {search_query} (Category: {category}, Context: {context or 'auto-detected'})")
             
-            # Search with text content extraction - get more text for better descriptions
+            # OPTIMIZED: Reduced text extraction for faster processing
+            # Search with text content extraction - reduced for speed
             # Note: Exa's search_and_contents doesn't support summary parameter
             # Use get_contents with summary for individual URLs if needed
             search_options = {
                 "query": search_query,
-                "num_results": min(num_results * 3, 50),  # Request 3x to account for filtering
+                "num_results": min(num_results * 2, 30),  # Reduced from 3x to 2x, max 30 instead of 50
                 "type": "neural",  # Neural search for semantic matching
-                "text": {"max_characters": 3000}  # Get more text content for better descriptions
+                "text": {"max_characters": 1500}  # Reduced from 3000 to 1500 for faster processing
                 # Note: extras/image_links is only available in get_contents, not search_and_contents
             }
             
@@ -330,12 +342,16 @@ class ExaStructuredClient:
                 if domain:
                     search_options["include_domains"] = [domain]
 
-            # Execute search
+            # Execute search - OPTIMIZED: Use async executor with timeout
             try:
                 logger.info(f"📡 Calling Exa API with query: {search_query}")
-                response = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: self._client.search_and_contents(**search_options)
+                # Add timeout to prevent hanging
+                response = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: self._client.search_and_contents(**search_options)
+                    ),
+                    timeout=10.0  # 10 second timeout per store search
                 )
                 
                 if not response:
@@ -346,6 +362,9 @@ class ExaStructuredClient:
                 
                 # Process results
                 products = await self._process_search_results(response, store_name, zipcode)
+            except asyncio.TimeoutError:
+                logger.warning(f"⏱️ Exa API call timed out for {store_name}")
+                return []
             except Exception as e:
                 logger.error(f"❌ Exa API call failed: {e}", exc_info=True)
                 return []
@@ -454,93 +473,147 @@ class ExaStructuredClient:
         store_name: Optional[str],
         zipcode: Optional[str]
     ) -> List[Dict[str, Any]]:
-        """Process Exa search results into structured product data"""
+        """Process Exa search results into structured product data - OPTIMIZED for speed"""
         products = []
 
         try:
             results = getattr(response, "results", [])
             logger.info(f"🔍 Processing {len(results)} results from Exa")
 
-            for idx, result in enumerate(results):
-                try:
-                    # Check if this is an actual product page
-                    url = getattr(result, "url", "")
-                    title = getattr(result, "title", "")
-
-                    if not url:
-                        logger.debug(f"Skipping result {idx}: No URL")
-                        continue
-                    
-                    logger.debug(f"Result {idx}: {title[:60]}... | URL: {url[:80]}...")
-
-                    if not self._is_product_page(url, title):
-                        logger.debug(f"Skipping non-product page: {title[:60]}... (URL: {url[:60]}...)")
-                        # For now, let's be less strict and include results that might be products
-                        # Only skip obvious search/category pages
-                        if any(exclude in url.lower() for exclude in ['/search', '/category', '/browse', '/s/', '/c/']):
-                            logger.debug(f"Definitely skipping search/category page: {url[:60]}...")
-                            continue
-
-                    # Extract product data (skip async image extraction during batch for performance)
-                    product = await self._extract_product_data(result, store_name, zipcode, extract_images_async=False)
-                    
-                    # Filter out gift cards and non-food items based on product name/content
-                    if product:
-                        product_name = product.get("name", "").lower()
-                        product_url_lower = product.get("product_url", "").lower()
-                        
-                        # Check for gift card indicators in product name or URL
-                        gift_card_keywords = [
-                            'gift card', 'giftcard', 'gift-card', 'egift', 'e-gift',
-                            'digital gift', 'prepaid', 'reloadable', 'gift certificate'
-                        ]
-                        
-                        # Check for category/brand pages (not specific products)
-                        category_page_indicators = [
-                            'products at', 'products in', 'products from',
-                            'at target', 'at walmart', 'at kroger',
-                            'shop all', 'browse', 'view all',
-                            'brand shop', 'brand store'
-                        ]
-                        
-                        # Skip gift cards
-                        if any(keyword in product_name or keyword in product_url_lower for keyword in gift_card_keywords):
-                            logger.debug(f"Filtering out gift card product: {product.get('name', 'Unknown')[:50]}...")
-                            continue
-                        
-                        # Skip category/brand pages (e.g., "STK Steakhouse products at Target")
-                        if any(indicator in product_name for indicator in category_page_indicators):
-                            logger.debug(f"Filtering out category page: {product.get('name', 'Unknown')[:50]}...")
-                            continue
-                    
-                    # If no image found and we have a product URL, try async extraction
-                    # This is important because search_and_contents doesn't return image_links
-                    if product and not product.get("image_url") and product.get("product_url"):
-                        try:
-                            logger.debug(f"🖼️ No image found for {product.get('name', 'Unknown')[:50]}, trying async extraction...")
-                            extracted_image = await self.get_product_image_url(product["product_url"])
-                            if extracted_image:
-                                product["image_url"] = extracted_image
-                                logger.info(f"✅ Got image via async extraction for {product.get('name', 'Unknown')[:50]}: {extracted_image[:80]}...")
-                            else:
-                                logger.debug(f"⚠️ Async extraction returned no image for {product.get('product_url', 'Unknown')[:80]}...")
-                        except Exception as e:
-                            logger.debug(f"Failed async image extraction: {e}")
-                    
-                    if product:
-                        products.append(product)
-                        logger.debug(f"✅ Added product: {product.get('name', 'Unknown')[:50]}...")
-                    else:
-                        logger.debug(f"⚠️ Failed to extract product data from: {title[:50]}...")
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to process result {idx}: {e}")
-                    continue
+            # OPTIMIZED: Process results concurrently (up to 10 at a time)
+            semaphore = asyncio.Semaphore(10)
+            
+            async def process_single_result(idx: int, result: Any):
+                async with semaphore:
+                    return await self._process_single_result(result, store_name, zipcode, idx)
+            
+            # Process all results concurrently
+            tasks = [process_single_result(idx, result) for idx, result in enumerate(results)]
+            processed_results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Filter out None and exceptions
+            for processed in processed_results:
+                if processed and isinstance(processed, dict):
+                    products.append(processed)
+                elif isinstance(processed, Exception):
+                    logger.debug(f"Failed to process result: {processed}")
 
             logger.info(f"✅ Processed {len(results)} results, extracted {len(products)} products")
         except Exception as e:
             logger.error(f"❌ Failed to process search results: {e}")
 
         return products
+    
+    async def _process_single_result(
+        self,
+        result: Any,
+        store_name: Optional[str],
+        zipcode: Optional[str],
+        idx: int
+    ) -> Optional[Dict[str, Any]]:
+        """Process a single search result - extracted for concurrent processing"""
+        try:
+            # Check if this is an actual product page
+            url = getattr(result, "url", "")
+            title = getattr(result, "title", "")
+
+            if not url:
+                logger.debug(f"Skipping result {idx}: No URL")
+                return None
+            
+            logger.debug(f"Result {idx}: {title[:60]}... | URL: {url[:80]}...")
+
+            if not self._is_product_page(url, title):
+                logger.debug(f"Skipping non-product page: {title[:60]}... (URL: {url[:60]}...)")
+                # For now, let's be less strict and include results that might be products
+                # Only skip obvious search/category pages
+                if any(exclude in url.lower() for exclude in ['/search', '/category', '/browse', '/s/', '/c/']):
+                    logger.debug(f"Definitely skipping search/category page: {url[:60]}...")
+                    return None
+
+            # Extract product data (skip async image extraction during batch for performance)
+            product = await self._extract_product_data(result, store_name, zipcode, extract_images_async=False)
+            
+            # Filter out gift cards and non-food items based on product name/content
+            if product:
+                product_name = product.get("name", "").lower()
+                product_url_lower = product.get("product_url", "").lower()
+                
+                # Check for gift card indicators in product name or URL
+                gift_card_keywords = [
+                    'gift card', 'giftcard', 'gift-card', 'egift', 'e-gift',
+                    'digital gift', 'prepaid', 'reloadable', 'gift certificate'
+                ]
+                
+                # Check for category/brand pages (not specific products)
+                category_page_indicators = [
+                    'products at', 'products in', 'products from',
+                    'at target', 'at walmart', 'at kroger',
+                    'shop all', 'browse', 'view all',
+                    'brand shop', 'brand store'
+                ]
+                
+                # Skip gift cards
+                if any(keyword in product_name or keyword in product_url_lower for keyword in gift_card_keywords):
+                    logger.debug(f"Filtering out gift card product: {product.get('name', 'Unknown')[:50]}...")
+                    return None
+                
+                # Skip category/brand pages (e.g., "STK Steakhouse products at Target")
+                if any(indicator in product_name for indicator in category_page_indicators):
+                    logger.debug(f"Filtering out category page: {product.get('name', 'Unknown')[:50]}...")
+                    return None
+            
+            # SMART IMAGE CACHING: Check cache first, then Exa if needed
+            if product and not product.get("image_url"):
+                # Try fuzzy matching cache first (FAST - DB lookup)
+                cached_image = None
+                if _image_cache:
+                    try:
+                        cached_image = await _image_cache.get_cached_image(
+                            name=product.get("name", ""),
+                            brand=product.get("brand"),
+                            size=product.get("size") or product.get("quantity"),
+                            store=product.get("store_name")
+                        )
+                        if cached_image:
+                            product["image_url"] = cached_image
+                            logger.debug(f"✅ Got image from cache for '{product.get('name', 'Unknown')[:50]}'")
+                    except Exception as e:
+                        logger.debug(f"Cache lookup failed: {e}")
+                
+                # If cache miss, try Exa extraction (SLOW - API call)
+                if not product.get("image_url") and product.get("product_url"):
+                    try:
+                        extracted_image = await self.get_product_image_url(product["product_url"])
+                        if extracted_image:
+                            product["image_url"] = extracted_image
+                            # Cache it for future use
+                            if _image_cache:
+                                try:
+                                    await _image_cache.cache_image(
+                                        name=product.get("name", ""),
+                                        image_url=extracted_image,
+                                        brand=product.get("brand"),
+                                        size=product.get("size") or product.get("quantity"),
+                                        store=product.get("store_name"),
+                                        product_url=product.get("product_url")
+                                    )
+                                except Exception as e:
+                                    logger.debug(f"Failed to cache image: {e}")
+                            logger.debug(f"✅ Got image from Exa for '{product.get('name', 'Unknown')[:50]}'")
+                    except Exception as e:
+                        logger.debug(f"Exa image extraction failed: {e}")
+            
+            if product:
+                logger.debug(f"✅ Added product: {product.get('name', 'Unknown')[:50]}...")
+                return product
+            else:
+                logger.debug(f"⚠️ Failed to extract product data from: {title[:50]}...")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to process result {idx}: {e}")
+            return None
     
     
     def _clean_exa_summary(self, summary: str) -> Optional[str]:
@@ -717,6 +790,70 @@ class ExaStructuredClient:
         
         return None
     
+    async def _get_price_from_exa(self, url: Optional[str]) -> Optional[float]:
+        """
+        Get price from Exa using structured extraction.
+        This makes an API call to Exa to get structured price data.
+        
+        Returns price as float or None if extraction fails.
+        """
+        if not url or not self.is_available():
+            return None
+        
+        try:
+            # Define schema focused on price
+            price_schema = {
+                "type": "object",
+                "properties": {
+                    "price": {
+                        "type": "number",
+                        "description": "Product price in USD. Extract the exact numeric price value (e.g., 4.99, 12.50, 29.99). Look for price displays, pricing sections, 'add to cart' prices, or any price indicators on the page. Return only the numeric value without currency symbols."
+                    },
+                    "price_text": {
+                        "type": "string",
+                        "description": "Original price text as displayed on page (e.g., '$4.99', '$12.50/lb', '29.99')"
+                    }
+                },
+                "required": ["price"]
+            }
+            
+            response = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self._client.get_contents(
+                    [url],
+                    text=True,
+                    summary={
+                        "query": "Extract the product price from this product page. Look for price displays, pricing sections, 'add to cart' prices, sale prices, regular prices, or any price indicators. Return the exact numeric price value in USD (e.g., 4.99, 12.50, 29.99). Ignore unit prices or per-pound prices unless that's the only price shown.",
+                        "schema": price_schema
+                    }
+                )
+            )
+            
+            if response and response.results:
+                result = response.results[0]
+                if hasattr(result, "summary") and result.summary:
+                    # Parse the summary JSON to get price
+                    try:
+                        summary_data = json.loads(result.summary)
+                        exa_price = summary_data.get("price")
+                        if exa_price is not None:
+                            try:
+                                price_value = float(exa_price)
+                                # Validate price is reasonable
+                                if 0.01 <= price_value <= 1000:
+                                    logger.debug(f"✅ Got price from Exa structured extraction: ${price_value}")
+                                    return price_value
+                            except (ValueError, TypeError):
+                                pass
+                    except (json.JSONDecodeError, AttributeError):
+                        # If summary is not JSON, try to extract from text
+                        pass
+            
+            return None
+        except Exception as e:
+            logger.debug(f"Failed to get price from Exa for {url[:80]}...: {e}")
+            return None
+    
     async def _get_availability_from_exa(self, url: Optional[str]) -> Optional[str]:
         """
         Get availability status from Exa using structured extraction.
@@ -870,10 +1007,65 @@ class ExaStructuredClient:
         try:
             import re
 
-            # Get title and URL
+            # Get title and URL - OPTIMIZED: Reduced text processing
             title = getattr(result, "title", "Unknown Product")
             url = getattr(result, "url", None)
-            text = getattr(result, "text", "")[:3000] if hasattr(result, "text") else ""
+            text = getattr(result, "text", "")[:1500] if hasattr(result, "text") else ""  # Reduced from 3000 to 1500
+            
+            # Try to use store-specific extractor if we have HTML content
+            # This is especially useful for search result pages
+            detected_store_id = self._detect_store_from_url(url)
+            if detected_store_id and text and len(text) > 500:
+                # Check if this looks like a search results page (has multiple products)
+                try:
+                    extractor = get_extractor(detected_store_id)
+                    if extractor and hasattr(extractor, 'extract_products'):
+                        # Try to extract products using store-specific extractor
+                        extracted_products = extractor.extract_products(text, detected_store_id)
+                        if extracted_products and len(extracted_products) > 0:
+                            # Use the first product (or best match)
+                            store_product = extracted_products[0]
+                            logger.debug(f"✅ Extracted product using {detected_store_id} extractor: {store_product.get('name', 'Unknown')[:50]}")
+                            
+                            # Enhance with additional data from Exa result
+                            enhanced_product = {
+                                "name": store_product.get('name') or title,
+                                "brand": store_product.get('brand'),
+                                "price": store_product.get('price'),
+                                "price_display": store_product.get('price_display'),
+                                "price_per_unit": store_product.get('price_per_unit'),
+                                "size": store_product.get('size'),
+                                "variants": store_product.get('variants'),
+                                "currency": "USD",
+                                "quantity": store_product.get('size') or store_product.get('quantity'),
+                                "availability": store_product.get('availability', 'Check Store'),
+                                "image_url": store_product.get('image_url'),
+                                "product_url": store_product.get('product_url') or url,
+                                "description": None,  # Will be filled below
+                                "category": None,
+                                "rating": store_product.get('rating'),
+                                "reviews_count": store_product.get('review_count'),
+                                "store_name": store_product.get('store_name') or detected_store_id.title(),
+                                "store_zipcode": zipcode,
+                                "source": "exa_structured_with_extractor"
+                            }
+                            
+                            # Try to get description from Exa summary if available
+                            exa_summary = None
+                            if hasattr(result, "summary") and result.summary:
+                                exa_summary = result.summary
+                            
+                            if exa_summary:
+                                enhanced_product["description"] = self._clean_exa_summary(exa_summary)
+                            else:
+                                enhanced_product["description"] = self._extract_product_description(text, title)
+                            
+                            # If we got a good extraction, use it
+                            if enhanced_product.get('name') and enhanced_product.get('price'):
+                                return enhanced_product
+                except Exception as extractor_error:
+                    logger.debug(f"Store extractor failed, falling back to standard extraction: {extractor_error}")
+                    # Fall through to standard extraction
             
             # Try to get Exa summary for better description (if available)
             exa_summary = None
@@ -883,15 +1075,27 @@ class ExaStructuredClient:
 
             # Extract price from text content using regex
             price = None
-            # Look for price with dollar sign first
+            
+            # Improved price extraction patterns
+            # Pattern 1: Price with dollar sign: $4.99, $12.50, $29.99
             price_with_dollar = re.search(r'\$(\d+\.\d{2})', text)
             if price_with_dollar:
                 try:
                     price = float(price_with_dollar.group(1))
                 except:
                     pass
-
-            # If no price found, look for decimal numbers in reasonable range
+            
+            # Pattern 2: Price without dollar sign but with context: "4.99", "Price: 12.50"
+            if not price:
+                # Look for patterns like "Price: 4.99", "Cost: 12.50", "Only 29.99"
+                contextual_price = re.search(r'(?:price|cost|only|was|now|save|sale)[\s:]*\$?(\d+\.\d{2})', text, re.IGNORECASE)
+                if contextual_price:
+                    try:
+                        price = float(contextual_price.group(1))
+                    except:
+                        pass
+            
+            # Pattern 3: Decimal numbers in reasonable range (fallback)
             if not price:
                 all_decimals = re.findall(r'\b(\d+\.\d{2})\b', text)
                 for decimal in all_decimals:
@@ -902,6 +1106,34 @@ class ExaStructuredClient:
                             break
                     except:
                         continue
+            
+            # Pattern 4: Whole Foods specific patterns (e.g., "4 99" or "12 50" without decimal)
+            if not price and url and "wholefoodsmarket.com" in url:
+                # Look for patterns like "4 99" (space instead of decimal)
+                space_price = re.search(r'(\d+)\s+(\d{2})\b', text)
+                if space_price:
+                    try:
+                        dollars = int(space_price.group(1))
+                        cents = int(space_price.group(2))
+                        if 0 <= dollars <= 500 and 0 <= cents <= 99:
+                            price = float(f"{dollars}.{cents:02d}")
+                    except:
+                        pass
+            
+            # Priority: Use Exa structured extraction for Whole Foods (always) or if regex failed
+            # This is especially important for Whole Foods as their price format may vary
+            is_whole_foods = url and "wholefoodsmarket.com" in url
+            if (not price or is_whole_foods) and url:
+                try:
+                    exa_price = await self._get_price_from_exa(url)
+                    if exa_price:
+                        # For Whole Foods, prefer Exa extraction (more reliable)
+                        # For other stores, use Exa only if regex failed
+                        if is_whole_foods or not price:
+                            price = exa_price
+                            logger.debug(f"✅ Got price from Exa structured extraction{' for Whole Foods' if is_whole_foods else ''}: ${price}")
+                except Exception as e:
+                    logger.debug(f"Failed to get price from Exa: {e}")
 
             # Extract brand from title or text
             brand = None
@@ -923,83 +1155,162 @@ class ExaStructuredClient:
                     quantity = match.group(1)
                     break
 
-            # Extract image URLs - prioritize Exa-extracted images
+            # Detect store from URL (using helper method) - NEEDED BEFORE CACHE LOOKUP
+            detected_store = self._detect_store_from_url(url) or store_name
+            if detected_store:
+                detected_store = detected_store.title()
+
+            # SMART IMAGE EXTRACTION: Cache -> Exa image_links -> Exa image field
             image_url = None
+            
+            # Priority 0: Check fuzzy matching cache FIRST (FASTEST - DB lookup)
+            if _image_cache and title:
+                try:
+                    cached_image = await _image_cache.get_cached_image(
+                        name=title,
+                        brand=brand,
+                        size=quantity,
+                        store=detected_store
+                    )
+                    if cached_image:
+                        image_url = cached_image
+                        logger.debug(f"✅ Got image from cache: {cached_image[:80]}...")
+                except Exception as e:
+                    logger.debug(f"Cache lookup failed: {e}")
             
             # Priority 1: Check for image_links in extras (Exa-extracted product images)
             # This is like Exa "right-clicking" the image and copying the URL
-            if hasattr(result, "extras") and result.extras:
+            if not image_url and hasattr(result, "extras") and result.extras:
                 # Try both snake_case and camelCase for compatibility
                 image_links = getattr(result.extras, "image_links", None) or getattr(result.extras, "imageLinks", None)
                 if image_links and len(image_links) > 0:
                     image_url = image_links[0]
                     logger.debug(f"✅ Got image from Exa image_links: {image_url[:80]}...")
+                    # Cache it for future use
+                    if _image_cache:
+                        try:
+                            await _image_cache.cache_image(
+                                name=title,
+                                image_url=image_url,
+                                brand=brand,
+                                size=quantity,
+                                store=detected_store,
+                                product_url=url
+                            )
+                        except Exception as e:
+                            logger.debug(f"Failed to cache image: {e}")
             
             # Priority 2: Check Exa's image field (may be thumbnail or page image)
             if not image_url and hasattr(result, "image") and result.image:
                 image_url = result.image
                 logger.debug(f"✅ Using Exa image field: {image_url[:80]}...")
-
-            # Detect store from URL
-            detected_store = store_name
-            if url:
+                # Cache it for future use
+                if _image_cache:
+                    try:
+                        await _image_cache.cache_image(
+                            name=title,
+                            image_url=image_url,
+                            brand=brand,
+                            size=quantity,
+                            store=detected_store,
+                            product_url=url
+                        )
+                    except Exception as e:
+                        logger.debug(f"Failed to cache image: {e}")
+            
+            # Fallback image extraction for specific stores (only if still no image)
+            # Cache any extracted images for future use
+            if not image_url and url:
                 if "target.com" in url:
-                    detected_store = "Target"
-                    # Fallback: Try to extract Target image URL if Exa didn't provide one
-                    if not image_url:
-                        # Try to find GUEST ID pattern in text (Target images often have GUEST IDs in HTML)
-                        guest_match = re.search(r'GUEST_[a-f0-9\-]+', text, re.IGNORECASE)
-                        if guest_match:
-                            guest_id = guest_match.group(0)
-                            image_url = f"https://target.scene7.com/is/image/Target/{guest_id}?wid=1200&hei=1200&qlt=80"
-                        elif extract_images_async:
-                            # Only do async extraction if explicitly requested (not during batch processing)
+                    # Try to find GUEST ID pattern in text (Target images often have GUEST IDs in HTML)
+                    guest_match = re.search(r'GUEST_[a-f0-9\-]+', text, re.IGNORECASE)
+                    if guest_match:
+                        guest_id = guest_match.group(0)
+                        image_url = f"https://target.scene7.com/is/image/Target/{guest_id}?wid=1200&hei=1200&qlt=80"
+                        # Cache it
+                        if _image_cache:
                             try:
-                                extracted_image = await self.get_product_image_url(url)
-                                if extracted_image:
-                                    image_url = extracted_image
+                                await _image_cache.cache_image(
+                                    name=title,
+                                    image_url=image_url,
+                                    brand=brand,
+                                    size=quantity,
+                                    store=detected_store,
+                                    product_url=url
+                                )
                             except Exception as e:
-                                logger.debug(f"Failed to extract Target image: {e}")
+                                logger.debug(f"Failed to cache Target image: {e}")
+                    elif extract_images_async:
+                        # Only do async extraction if explicitly requested
+                        try:
+                            extracted_image = await self.get_product_image_url(url)
+                            if extracted_image:
+                                image_url = extracted_image
+                                # Cache it
+                                if _image_cache:
+                                    try:
+                                        await _image_cache.cache_image(
+                                            name=title,
+                                            image_url=image_url,
+                                            brand=brand,
+                                            size=quantity,
+                                            store=detected_store,
+                                            product_url=url
+                                        )
+                                    except Exception as e:
+                                        logger.debug(f"Failed to cache Target image: {e}")
+                        except Exception as e:
+                            logger.debug(f"Failed to extract Target image: {e}")
                 elif "walmart.com" in url:
-                    detected_store = "Walmart"
-                    # Fallback: Try to extract Walmart image URL
-                    if not image_url:
-                        # Try to find Walmart image pattern in text - be more precise
-                        # Match URLs but stop at common delimiters like ), ], }, ", '
-                        walmart_img_patterns = [
-                            # Match full URL with query params, stopping at ) or other delimiters
-                            r'https?://i\d+\.walmartimages\.com/[^\s"\'\)\]\}\s]+\.(?:jpg|jpeg|png|webp|gif)(?:\?[^\s"\'\)\]\}]*)?',
-                            # Match without query params
-                            r'https?://i\d+\.walmartimages\.com/[^\s"\'\)\]\}]+\.(?:jpg|jpeg|png|webp|gif)',
-                        ]
-                        for pattern in walmart_img_patterns:
-                            walmart_img_match = re.search(pattern, text, re.IGNORECASE)
-                            if walmart_img_match:
-                                # Extract the match and clean it up
-                                raw_url = walmart_img_match.group(0)
-                                # Remove trailing punctuation and invalid characters
-                                image_url = raw_url.rstrip('.,;!?)').split(')')[0].split(']')[0].split('}')[0].split('"')[0].split("'")[0]
-                                # Validate it's still a valid URL
-                                if image_url.startswith('http') and '.' in image_url:
-                                    logger.debug(f"✅ Extracted Walmart image from text: {image_url[:80]}...")
-                                    break
-                                else:
-                                    image_url = None
-                        # If still no image, try async extraction
-                        if not image_url and extract_images_async:
-                            try:
-                                extracted_image = await self.get_product_image_url(url)
-                                if extracted_image:
-                                    image_url = extracted_image
-                                    logger.debug(f"✅ Got Walmart image via async extraction: {image_url[:80]}...")
-                            except Exception as e:
-                                logger.debug(f"Failed to extract Walmart image: {e}")
-                elif "wholefoodsmarket.com" in url:
-                    detected_store = "Whole Foods"
-                elif "kroger.com" in url:
-                    detected_store = "Kroger"
-                elif "aldi.us" in url:
-                    detected_store = "ALDI"
+                    # Try to find Walmart image pattern in text
+                    walmart_img_patterns = [
+                        r'https?://i\d+\.walmartimages\.com/[^\s"\'\)\]\}\s]+\.(?:jpg|jpeg|png|webp|gif)(?:\?[^\s"\'\)\]\}]*)?',
+                        r'https?://i\d+\.walmartimages\.com/[^\s"\'\)\]\}]+\.(?:jpg|jpeg|png|webp|gif)',
+                    ]
+                    for pattern in walmart_img_patterns:
+                        walmart_img_match = re.search(pattern, text, re.IGNORECASE)
+                        if walmart_img_match:
+                            raw_url = walmart_img_match.group(0)
+                            image_url = raw_url.rstrip('.,;!?)').split(')')[0].split(']')[0].split('}')[0].split('"')[0].split("'")[0]
+                            if image_url.startswith('http') and '.' in image_url:
+                                logger.debug(f"✅ Extracted Walmart image from text: {image_url[:80]}...")
+                                # Cache it
+                                if _image_cache:
+                                    try:
+                                        await _image_cache.cache_image(
+                                            name=title,
+                                            image_url=image_url,
+                                            brand=brand,
+                                            size=quantity,
+                                            store=detected_store,
+                                            product_url=url
+                                        )
+                                    except Exception as e:
+                                        logger.debug(f"Failed to cache Walmart image: {e}")
+                                break
+                            else:
+                                image_url = None
+                    # If still no image, try async extraction
+                    if not image_url and extract_images_async:
+                        try:
+                            extracted_image = await self.get_product_image_url(url)
+                            if extracted_image:
+                                image_url = extracted_image
+                                # Cache it
+                                if _image_cache:
+                                    try:
+                                        await _image_cache.cache_image(
+                                            name=title,
+                                            image_url=image_url,
+                                            brand=brand,
+                                            size=quantity,
+                                            store=detected_store,
+                                            product_url=url
+                                        )
+                                    except Exception as e:
+                                        logger.debug(f"Failed to cache Walmart image: {e}")
+                        except Exception as e:
+                            logger.debug(f"Failed to extract Walmart image: {e}")
 
             # Clean and extract meaningful description
             # Prefer Exa summary (AI-generated, much better quality)
@@ -1043,13 +1354,16 @@ class ExaStructuredClient:
                     logger.debug(f"Failed to extract availability from text: {e}")
                     availability = "Check Store"
             
-            # Build product object
+            # Build product object with enhanced fields
             product = {
                 "name": title,
                 "brand": brand,
                 "price": price,
                 "currency": "USD",
                 "quantity": quantity,
+                "price_per_unit": None,  # Will be extracted if available
+                "size": quantity,  # Alias for quantity
+                "variants": None,  # Will be extracted if available
                 "availability": availability,
                 "image_url": image_url,
                 "product_url": url,
@@ -1061,12 +1375,54 @@ class ExaStructuredClient:
                 "store_zipcode": zipcode,
                 "source": "exa_structured"
             }
+            
+            # Try to extract price per unit and variants from text if available
+            if text:
+                # Extract price per unit (e.g., "$0.02/fl oz", "$/lb")
+                price_per_unit_match = re.search(r'\$(\d+\.?\d*)\s*/\s*([^\s]+)', text)
+                if price_per_unit_match:
+                    unit_price = price_per_unit_match.group(1)
+                    unit = price_per_unit_match.group(2)
+                    product["price_per_unit"] = f"${unit_price}/{unit}"
+                
+                # Extract variants (e.g., "3 more sizes | 6 more flavors")
+                variants_match = re.search(r'(\d+\s+more\s+sizes?[^|]*\|?\s*\d*\s*more\s+flavors?)', text, re.IGNORECASE)
+                if variants_match:
+                    product["variants"] = variants_match.group(1).strip()
 
             return product
 
         except Exception as e:
             logger.error(f"❌ Failed to extract product data: {e}")
             return None
+    
+    def _detect_store_from_url(self, url: Optional[str]) -> Optional[str]:
+        """Detect store ID from URL"""
+        if not url:
+            return None
+        
+        url_lower = url.lower()
+        store_mappings = {
+            'target.com': 'target',
+            'walmart.com': 'walmart',
+            'kroger.com': 'kroger',
+            'wholefoodsmarket.com': 'whole_foods',
+            'safeway.com': 'safeway',
+            'albertsons.com': 'albertsons',
+            'aldi.us': 'aldi',
+            'costco.com': 'costco',
+            'samsclub.com': 'sams_club',
+            'traderjoes.com': 'trader_joes',
+            'publix.com': 'publix',
+            'heb.com': 'heb',
+            'wegmans.com': 'wegmans',
+        }
+        
+        for domain, store_id in store_mappings.items():
+            if domain in url_lower:
+                return store_id
+        
+        return None
     
     async def get_product_image_url(self, product_url: str) -> Optional[str]:
         """

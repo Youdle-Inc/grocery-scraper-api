@@ -30,7 +30,8 @@ else:
 from scraper.models import StoreInfo
 from scraper.location_service import LocationService
 from scraper.cache import Cache, stores_key, products_key
-from scraper.exa_structured_client import ExaStructuredClient
+from scraper.exa_structured_client import ExaStructuredClient, set_image_cache
+from scraper.image_cache import ProductImageCache
 from scraper.models import (
     HealthResponse,
     StoresResponse,
@@ -153,10 +154,14 @@ app.add_middleware(
 # Static files removed for Vercel compatibility
 
 # Initialize services
+cache = Cache()
 exa_client = ExaStructuredClient()
+
+# Initialize image cache with fuzzy matching
+image_cache = ProductImageCache(cache)
+set_image_cache(image_cache)  # Make it available to ExaStructuredClient
 location_service = LocationService()
 ai_scraper = AIScraper()  # AI-powered scraper for direct price extraction
-cache = Cache()
 
 # Debug: Check client status
 logger.info(f"🔍 ExaStructuredClient initialized: {exa_client.is_available()}")
@@ -503,52 +508,19 @@ async def search_products(
             context=context
         )
         
-        # Enhance products with missing images using hybrid approach
-        products_needing_images = [
-            (idx, p) for idx, p in enumerate(products)
-            if p.get("product_url") and not p.get("image_url")
-        ]
+        # SMART IMAGE HANDLING: Cache lookup + Exa extraction
+        # Images are fetched using:
+        # 1. Fuzzy matching cache (FAST - DB lookup, reuses images for similar products)
+        # 2. Exa image_links (already included in search results)
+        # 3. Exa get_contents (if needed, cached for future use)
+        # This gives us images while staying fast!
         
-        if products_needing_images:
-            logger.info(f"🖼️ Extracting images for {len(products_needing_images)} products missing images...")
-            urls_to_fetch = [p.get("product_url") for _, p in products_needing_images]
-            
-            # Priority 1: Try Exa batch extraction
-            exa_image_results = {}
-            if exa_client.is_available():
-                try:
-                    exa_image_results = await exa_client.get_product_images_batch(
-                        urls_to_fetch,
-                        max_concurrent=5
-                    )
-                    logger.info(f"✅ Exa batch: {sum(1 for v in exa_image_results.values() if v)}/{len(exa_image_results)} images found")
-                except Exception as e:
-                    logger.debug(f"Exa batch extraction failed: {e}")
-            
-            # Priority 2: HTML scraper for remaining
-            remaining_urls = [url for url in urls_to_fetch if url not in exa_image_results or not exa_image_results[url]]
-            html_image_results = {}
-            if remaining_urls:
-                try:
-                    async with HTMLImageExtractor() as html_extractor:
-                        html_image_results = await html_extractor.extract_images_batch(
-                            remaining_urls,
-                            max_concurrent=10
-                        )
-                    logger.info(f"✅ HTML scraper: {sum(1 for v in html_image_results.values() if v)}/{len(html_image_results)} images found")
-                except Exception as e:
-                    logger.debug(f"HTML extraction failed: {e}")
-            
-            # Update products with extracted images
-            for idx, product in products_needing_images:
-                product_url = product.get("product_url")
-                if product_url:
-                    # Try Exa first
-                    if product_url in exa_image_results and exa_image_results[product_url]:
-                        products[idx]["image_url"] = exa_image_results[product_url]
-                    # Then HTML scraper
-                    elif product_url in html_image_results and html_image_results[product_url]:
-                        products[idx]["image_url"] = html_image_results[product_url]
+        # Cache all products with images for future fuzzy matching
+        if products:
+            try:
+                await image_cache.cache_images_batch(products)
+            except Exception as e:
+                logger.debug(f"Failed to cache product images: {e}")
         
         response_payload = {
             "query": query,
@@ -794,8 +766,8 @@ async def aggregate_products(
                 detail="Exa client not available - check API key configuration"
             )
 
-        # Search products across all stores concurrently
-        semaphore = asyncio.Semaphore(5)  # Limit concurrent searches
+        # Search products across all stores concurrently - INCREASED CONCURRENCY
+        semaphore = asyncio.Semaphore(10)  # Increased from 5 to 10 for faster parallel processing
         
         async def fetch_store_products(store_id: str):
             async with semaphore:
@@ -803,12 +775,13 @@ async def aggregate_products(
                     store_name = to_store_name(store_id)
                     logger.info(f"Searching {store_name} for '{query}' near {zipcode}")
                     
+                    # Optimized: Reduced num_results and text extraction for faster response
                     products = await exa_client.search_products_structured(
                         query=query,
                         store_name=store_name,
                         zipcode=zipcode,
-                        num_results=10,
-                        include_location=True,
+                        num_results=8,  # Reduced from 10 to 8 for faster processing
+                        include_location=False,  # Skip location fetching for speed (can be added later if needed)
                         context="price_comparison"  # Use price comparison context for aggregate
                     )
                     
@@ -825,9 +798,17 @@ async def aggregate_products(
                         "products": []
                     }
 
-        # Fetch from all stores concurrently
+        # Fetch from all stores concurrently with timeout
         tasks = [fetch_store_products(sid) for sid in considered_store_ids]
-        store_results = await asyncio.gather(*tasks, return_exceptions=False)
+        # Use asyncio.wait_for with timeout to prevent hanging
+        async def fetch_with_timeout(task, timeout=15):
+            try:
+                return await asyncio.wait_for(task, timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.warning(f"Store search timed out after {timeout}s")
+                return {"store_id": "unknown", "store_name": "Unknown", "products": []}
+        
+        store_results = await asyncio.gather(*[fetch_with_timeout(task) for task in tasks], return_exceptions=False)
 
         # Log results from each store
         total_products = 0
