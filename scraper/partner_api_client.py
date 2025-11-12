@@ -34,10 +34,9 @@ class PartnerAPIClient:
         """Check if a store has an official partner API"""
         store_id_lower = store_id.lower()
         
-        # Skip Target - use Exa instead
-        # if store_id_lower == "target":
-        #     return self.target_client.is_available()
-        if store_id_lower == "kroger":
+        if store_id_lower == "target":
+            return self.target_client.is_available()
+        elif store_id_lower == "kroger":
             return self.kroger_client.is_available()
         elif store_id_lower == "walmart":
             return self.walmart_client.is_available()
@@ -66,24 +65,25 @@ class PartnerAPIClient:
         store_id_lower = store_id.lower()
         
         try:
-            # Skip Target - use Exa instead
-            # if store_id_lower == "target" and self.target_client.is_available():
-            #     logger.info(f"🎯 Using Target official API for '{query}'")
-            #     if zipcode:
-            #         return await self.target_client.search_products_multiple_stores(
-            #             query=query,
-            #             zipcode=zipcode,
-            #             limit_per_store=limit // 3  # Distribute across stores
-            #         )
-            #     else:
-            #         # Without zipcode, we can't use Target API (requires store_id)
-            #         logger.warning("Target API requires zipcode for store lookup")
-            #         return []
+            products = []
             
-            if store_id_lower == "kroger" and self.kroger_client.is_available():
+            if store_id_lower == "target" and self.target_client.is_available():
+                logger.info(f"🎯 Using Target official API for '{query}'")
+                if zipcode:
+                    products = await self.target_client.search_products_multiple_stores(
+                        query=query,
+                        zipcode=zipcode,
+                        limit_per_store=limit // 3  # Distribute across stores
+                    )
+                else:
+                    # Without zipcode, we can't use Target API (requires store_id)
+                    logger.warning("Target API requires zipcode for store lookup")
+                    return []
+            
+            elif store_id_lower == "kroger" and self.kroger_client.is_available():
                 logger.info(f"🛒 Using Kroger official API for '{query}'")
                 if zipcode:
-                    return await self.kroger_client.search_products_multiple_stores(
+                    products = await self.kroger_client.search_products_multiple_stores(
                         query=query,
                         zipcode=zipcode,
                         limit_per_store=limit // 3  # Distribute across stores
@@ -96,7 +96,7 @@ class PartnerAPIClient:
             elif store_id_lower == "walmart" and self.walmart_client.is_available():
                 logger.info(f"🏪 Using Walmart official API for '{query}'")
                 # Walmart API doesn't require zipcode/store_id for basic search
-                return await self.walmart_client.search_products(
+                products = await self.walmart_client.search_products(
                     query=query,
                     limit=limit
                 )
@@ -105,8 +105,42 @@ class PartnerAPIClient:
                 # No partner API available for this store
                 logger.debug(f"No partner API available for {store_id}, will use Exa fallback")
                 return []
+            
+            # Normalize product format to match Exa format
+            return self._normalize_product_format(products, store_id)
                 
         except Exception as e:
             logger.error(f"Error using partner API for {store_id}: {e}", exc_info=True)
             return []
+    
+    def _normalize_product_format(self, products: List[Dict[str, Any]], store_id: str) -> List[Dict[str, Any]]:
+        """Normalize product format from partner APIs to match Exa format"""
+        normalized = []
+        for product in products:
+            # Convert source from list to string if needed
+            if isinstance(product.get("source"), list):
+                product["source"] = ", ".join(product["source"]) if product["source"] else "partner_api"
+            elif not product.get("source"):
+                product["source"] = "partner_api"
+            
+            # Ensure all required fields exist
+            normalized_product = {
+                "name": product.get("name", ""),
+                "brand": product.get("brand"),
+                "price": product.get("price"),
+                "currency": product.get("currency", "USD"),
+                "quantity": product.get("quantity"),
+                "size": product.get("size"),
+                "availability": product.get("availability", "Check Store"),
+                "product_url": product.get("product_url"),
+                "image_url": product.get("image_url"),
+                "store_name": product.get("store_name", store_id),
+                "store_zipcode": product.get("store_zipcode"),
+                "description": product.get("description"),
+                "category": product.get("category"),
+                "source": product.get("source", "partner_api"),
+                "upc": product.get("upc"),
+            }
+            normalized.append(normalized_product)
+        return normalized
 

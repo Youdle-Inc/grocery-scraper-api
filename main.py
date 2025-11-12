@@ -500,21 +500,54 @@ async def search_products(
             logger.info(f"cache_hit products q='{query}'")
             return {**cached, "cache": {"hit": True}}
         
-        if not exa_client.is_available():
-            raise HTTPException(
-                status_code=503,
-                detail="Exa client not available - check API key configuration"
-            )
+        products = []
         
-        # Search with Exa structured client using optimized prompts
-        products = await exa_client.search_products_structured(
-            query=query,
-            store_name=store_name,
-            zipcode=zipcode,
-            num_results=num_results,
-            include_location=True,
-            context=context
-        )
+        # Try partner API first if store_name is specified and we have API keys
+        if store_name:
+            store_id = store_name.lower().replace(" ", "_").replace("-", "_")
+            # Normalize common store name variations
+            store_id_map = {
+                "target": "target",
+                "walmart": "walmart",
+                "kroger": "kroger",
+                "whole_foods": "whole_foods",
+                "whole foods": "whole_foods",
+            }
+            store_id = store_id_map.get(store_id, store_id)
+            
+            if partner_api_client.has_partner_api(store_id):
+                logger.info(f"🎯 Using official {store_name} API for '{query}'")
+                try:
+                    products = await partner_api_client.search_products(
+                        store_id=store_id,
+                        query=query,
+                        zipcode=zipcode,
+                        limit=num_results
+                    )
+                    if products:
+                        logger.info(f"✅ {store_name} partner API returned {len(products)} products")
+                    else:
+                        logger.info(f"⚠️ {store_name} partner API returned no results, falling back to Exa")
+                except Exception as e:
+                    logger.warning(f"Partner API error for {store_name}: {e}, falling back to Exa")
+        
+        # Fallback to Exa if no partner API or partner API returned no results
+        if not products:
+            if not exa_client.is_available():
+                raise HTTPException(
+                    status_code=503,
+                    detail="Exa client not available - check API key configuration"
+                )
+            
+            logger.info(f"🔍 Using Exa API for {store_name or 'all stores'}")
+            products = await exa_client.search_products_structured(
+                query=query,
+                store_name=store_name,
+                zipcode=zipcode,
+                num_results=num_results,
+                include_location=True,
+                context=context
+            )
         
         # SMART IMAGE HANDLING: Cache lookup + Exa extraction
         # Images are fetched using:
@@ -530,6 +563,21 @@ async def search_products(
             except Exception as e:
                 logger.debug(f"Failed to cache product images: {e}")
         
+        # Determine source for response
+        source = "exa_structured"
+        if store_name and products:
+            store_id_normalized = store_name.lower().replace(" ", "_").replace("-", "_")
+            store_id_map = {
+                "target": "target",
+                "walmart": "walmart",
+                "kroger": "kroger",
+                "whole_foods": "whole_foods",
+                "whole foods": "whole_foods",
+            }
+            store_id_normalized = store_id_map.get(store_id_normalized, store_id_normalized)
+            if partner_api_client.has_partner_api(store_id_normalized):
+                source = "partner_api"
+        
         response_payload = {
             "query": query,
             "store_name": store_name or "All Stores",
@@ -537,7 +585,7 @@ async def search_products(
             "products_found": len(products),
             "search_timestamp": datetime.now().isoformat(),
             "products": products,
-            "source": "exa_structured",
+            "source": source,
             "api_version": "2.0.0"
         }
         
@@ -799,11 +847,10 @@ async def aggregate_products(
                         if products:
                             logger.info(f"✅ {store_name} partner API returned {len(products)} products")
                         else:
-                            logger.info(f"⚠️ {store_name} partner API returned no results, falling back to Exa")
-                    
-                    # Fallback to Exa if no partner API or partner API returned no results
-                    if not products:
-                        logger.info(f"🔍 Using Exa API for {store_name}")
+                            logger.info(f"⚠️ {store_name} partner API returned no results (skipping Exa for legacy products)")
+                    else:
+                        # Only use Exa for stores without partner API
+                        logger.info(f"🔍 Using Exa API for {store_name} (no partner API available)")
                         products = await exa_client.search_products_structured(
                             query=query,
                             store_name=store_name,
