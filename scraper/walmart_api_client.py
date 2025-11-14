@@ -33,14 +33,46 @@ class WalmartAPIClient:
         self.consumer_id = os.getenv("WALMART_CONSUMER_ID") or os.getenv("consumerId")
         # Affiliate ID for product URL replacement (default matches frontend: 3752911)
         self.affiliate_id = os.getenv("WALMART_AFFILIATE_ID", "3752911")
-        # Private key from environment - REQUIRED for Walmart API
+        # Private key from environment - Optional, falls back to hardcoded key matching TypeScript
         # Handle multi-line keys in .env file
         private_key_pem = self._read_multiline_env_var("WALMART_PRIVATE_KEY")
         
+        # Fallback to hardcoded key from TypeScript implementation if not set
         if not private_key_pem:
-            logger.info("ℹ️ WALMART_PRIVATE_KEY not set. Walmart partner API will be unavailable (will use Exa fallback).")
-            self.private_key = None
-        else:
+            logger.info("ℹ️ WALMART_PRIVATE_KEY not set, using fallback key from TypeScript implementation")
+            # This matches the private key from youdle-next-expo/utils/walmartUtils.ts
+            private_key_pem = (
+                "-----BEGIN RSA PRIVATE KEY-----\n"
+                "MIIEpQIBAAKCAQEAo9KLzqwKXs7Gy4pOUACcT32I16HkKH+6CyLnXv9a5NhJ7TEB"
+                "xvmlXtBlAXKc5F6Hy/voo4GnsUE4htoWowGso/TIMUnXoZGfhmBY7pOrVZe02uHQ"
+                "cCHg/VzOigSae/Ql0R0FPdnqtWLhJLCiRpf1MRAojNbz11ef+KNaCcNDRDEpMJif"
+                "s9p/c2tGwgYi3nJbSHRdt57m3gUoBt/d/g2F1K8+aU9Zdh0xOASGpP+HaixvBqER"
+                "k/gFc6DSg6jTa5PJUKT2YIakp4KL6OZHjF5p7AH3mCGL0F/zWZrqd0fkmx5hxG5s"
+                "a4UtiHps/mlc/bJRGn94C8CXQoAIIToATqodLwIDAQABAoIBAQCFPHbyZp+kjf3G"
+                "iry4elamm82Qup0qhv8TkZalf384QeSWIVZ1spJZs5mCfOm3Hl7Jex6w5IEzO30y"
+                "x+rDNlhnnGy5EXprcFlS28dYegdN/K1dm2x/1j37MeDVBXtzNpUPJtAdhr9KOJot"
+                "0e6ZBXuoJKEmMqhsylpTyN8ws3tg2GEt8oxJ+oQW0D1u1R/fv78Ua2PvubwYn61h"
+                "dOxg9M6HxihJC7p+HXJAk5X79OldOr3SaC4P8DzJrFT3Kano96MdQagzPdCV9GSQ"
+                "kzAj9dMGFxDoV3nbn3vpE9bJKWls/QczXQlhJKwjVS98H/3VbyU0NjCqPfdv6B6r"
+                "iJiL2D0pAoGBANhluwLwSYUN0bV0y+mi8NsKU/u4YSWwwd1wb9HPK/VeG0AMJ+Ca"
+                "zUZQjoppTGsD0V/ZZsMPYzLPrivgklNOXF2PYRa7+A8QrKPTkDe3UQqgv9HPmX00"
+                "ZZW7UUmNympOn8kUfEX0uYETYM8VU9qjkfo2adhLW90EZ3FdDPAhavcjAoGBAMHN"
+                "qsW8K7fOxvpZwWwRK4ZcXQXMvrfrfPILmm8fqiLpKaR3gL3BVWGs3IAwyvECeBLM"
+                "H1r2MB8ZMO/ThbE7AGOF9H+dJptffeGQ4fZhgj3XlG+WdFhPOwoFW/ssVgw8+CXK"
+                "R3S8edrONPmgGfscEC3qZMMfds1qmN83ELEnYOiFAoGBALXStJHBiGStudj3rCZB"
+                "bJL/WJWW1LmwjRQc1ze5FTxzt/3WuOL17yj3ou0VkMoSSSh6KOgY08brzXK8nPY2"
+                "T1GlmXRauBEgd46nwvOtqgB+FO6bumIDVp+65pAg/UTZj1SLS+gTupKDz8HwL6bz"
+                "7UIJ2mGM4EES5D/SaX6S9ad1AoGAAN3PhqTJuT+mahYepEILZMVi8RSyQZY+78IX"
+                "hamplBBgzEhwfeiwXghsz/Hn5l3xdXwOI9T38BunuVrDvUAbR1ag+jUUqBssL+b6"
+                "66QR9f7RvhH5IS/xfqD5gUz4cYOQRHL8EMyK6uyDFh6eHx5IADyNCMZKPK7eUhkn"
+                "7PLVHxUCgYEAmJIBog7Quppxb0WwvB31xRfuEqxu4H6W+KcFDQAtm9cnEIAsC2Ss"
+                "bxsDxEa1j8GAYywZDl0zhH0gwy8clk25NePMU8rO9WVBQSdDx9RQrGDkgd1HWWAS"
+                "JWuGUmAm+y41Oz1+uCajpTUOrjPQdwbKGnadgFtUD+fK/PiT4KkQBFs=\n"
+                "-----END RSA PRIVATE KEY-----"
+            )
+        
+        # Process the private key (whether from env or fallback)
+        if private_key_pem:
             try:
                 # Handle newlines - convert \n to actual newlines if needed
                 if "\\n" in private_key_pem:
@@ -55,11 +87,10 @@ class WalmartAPIClient:
                         logger.error("Make sure you copied the ENTIRE key from Walmart Developer Portal.")
                         logger.error("If the key has newlines, you may need to use \\n in your .env file or put it in quotes.")
                         self.private_key = None
-                        return
-                    
-                    logger.info("ℹ️ Walmart private key appears to be base64 only, adding PEM headers...")
-                    # Try PKCS#8 format first (what Walmart guide generates), then fall back to PKCS#1
-                    private_key_pem = f"-----BEGIN PRIVATE KEY-----\n{private_key_pem.strip()}\n-----END PRIVATE KEY-----"
+                    else:
+                        logger.info("ℹ️ Walmart private key appears to be base64 only, adding PEM headers...")
+                        # Try PKCS#8 format first (what Walmart guide generates), then fall back to PKCS#1
+                        private_key_pem = f"-----BEGIN PRIVATE KEY-----\n{private_key_pem.strip()}\n-----END PRIVATE KEY-----"
                 
                 # RSA.import_key handles both PKCS#1 (BEGIN RSA PRIVATE KEY) and PKCS#8 (BEGIN PRIVATE KEY)
                 self.private_key = RSA.import_key(private_key_pem)
@@ -71,6 +102,8 @@ class WalmartAPIClient:
                 logger.error("  2. Key has newlines - use \\n in .env or wrap in quotes")
                 logger.error("  3. Key format is wrong - should be PEM format or base64")
                 self.private_key = None
+        else:
+            self.private_key = None
         
         self.key_version = 2  # Match frontend implementation (keyVer: 2)
     
@@ -130,6 +163,7 @@ class WalmartAPIClient:
     
     def is_available(self) -> bool:
         """Check if Walmart API is available"""
+        # Only need consumer_id - private key has fallback
         return self.consumer_id is not None and self.private_key is not None
     
     def _generate_signature(self, timestamp: str) -> str:
