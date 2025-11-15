@@ -705,6 +705,9 @@ async def search_products(
     - Checking product availability at multiple retailers
     - Building shopping lists with optimal store selection
 
+    **Default Stores (when no stores parameter provided):**
+    walmart, kroger (or Mariano's in Chicago area), aldi, wegmans
+    
     **Available Stores:**
     target, walmart, whole_foods, kroger, aldi, costco, trader_joes, sams_club, safeway, albertsons, publix, heb, wegmans
     """,
@@ -730,7 +733,7 @@ async def aggregate_products(
             user_store_ids = [s.strip().lower() for s in stores.split(",") if s.strip()]
 
         # Default major grocery store chains
-        default_stores = ["target", "walmart", "whole_foods", "kroger", "aldi"]
+        default_stores = ["walmart", "kroger", "aldi", "wegmans"]
         considered_store_ids = user_store_ids[:10] if user_store_ids else default_stores
 
         # Helper functions for data normalization (needed for cache transformation)
