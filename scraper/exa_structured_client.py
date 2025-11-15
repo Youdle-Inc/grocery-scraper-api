@@ -487,6 +487,27 @@ class ExaStructuredClient:
                     return True
             return False
         
+        # ALDI-specific filtering - only include actual product pages
+        if 'aldi.us' in url_lower:
+            # ALDI product pages are at /product/{name}-{id}
+            if '/product/' in url_lower and not '/products/' in url_lower:
+                # Exclude category pages, search pages, help pages, etc.
+                exclude_aldi = [
+                    '/products/',  # Category/listing pages
+                    '/products/featured/',
+                    '/products/recipes/',
+                    '/help',
+                    '/about',
+                    '/privacy',
+                    '/terms',
+                    '/sitemap',
+                    '/stores',
+                    '/careers',
+                ]
+                if not any(exclude in url_lower for exclude in exclude_aldi):
+                    return True
+            return False
+        
         # Check for product page indicators
         product_indicators = [
             '/p/',  # Target product pages
@@ -571,6 +592,10 @@ class ExaStructuredClient:
                 # For Wegmans, be strict - only allow /shop/product/ URLs
                 if 'wegmans.com' in url.lower():
                     logger.debug(f"Filtering out Wegmans non-product URL: {url[:60]}...")
+                    return None
+                # For ALDI, be strict - only allow /product/ URLs (not /products/)
+                if 'aldi.us' in url.lower():
+                    logger.debug(f"Filtering out ALDI non-product URL: {url[:60]}...")
                     return None
                 # For now, let's be less strict and include results that might be products
                 # Only skip obvious search/category pages
@@ -1052,6 +1077,18 @@ class ExaStructuredClient:
                 # Check for out of stock indicators
                 if any(phrase in text_lower for phrase in ["out of stock", "unavailable", "not available", "sold out"]):
                     return "Out of Stock"
+            
+            # ALDI-specific patterns
+            if "aldi.us" in url_lower:
+                # ALDI shows products with "Add to Cart" button when available
+                # If product appears on page, it's typically available
+                if any(phrase in text_lower for phrase in ["add to cart", "add", "price", "$"]):
+                    # If we have a price and "Add to Cart", product is likely in stock
+                    if "$" in text or "price" in text_lower:
+                        return "In Stock"
+                # Check for out of stock indicators
+                if any(phrase in text_lower for phrase in ["out of stock", "unavailable", "not available", "sold out", "temporarily unavailable"]):
+                    return "Out of Stock"
         
         # Default: Check Store (when we can't determine)
         return "Check Store"
@@ -1084,6 +1121,19 @@ class ExaStructuredClient:
                     if title.lower() in generic_titles or len(title) < 10:
                         title = url_product_name
                         logger.debug(f"✅ Extracted Wegmans product name from URL: {title}")
+            
+            # ALDI-specific: Extract product name from URL if title is generic
+            if url and 'aldi.us/product/' in url.lower():
+                # URL format: /product/{name}-{id}
+                # Extract name from URL if title is generic
+                url_match = re.search(r'/product/(.+?)-000000000000\d+', url)
+                if url_match:
+                    url_product_name = url_match.group(1).replace('-', ' ').title()
+                    # If title is generic (like "ALDI", "Products", etc.), use URL name
+                    generic_titles = ['aldi', 'products', 'product', 'quality products', 'aldi us', 'loading']
+                    if title.lower() in generic_titles or len(title) < 10:
+                        title = url_product_name
+                        logger.debug(f"✅ Extracted ALDI product name from URL: {title}")
             
             # Try to use store-specific extractor if we have HTML content
             # This is especially useful for search result pages
@@ -1429,6 +1479,13 @@ class ExaStructuredClient:
                             # Wegmans shows products filtered by store/zipcode, so if it appears, it's available
                             availability = "In Stock"
                             logger.debug(f"✅ Wegmans product with price detected - assuming In Stock for store-filtered product")
+                    
+                    # For ALDI: If product has price and URL, assume in stock (products shown are typically available)
+                    if url and "aldi.us" in url.lower() and availability == "Check Store":
+                        if price or "$" in text:
+                            # ALDI shows products with prices when available, so if it appears, it's likely in stock
+                            availability = "In Stock"
+                            logger.debug(f"✅ ALDI product with price detected - assuming In Stock")
                 except Exception as e:
                     logger.debug(f"Failed to extract availability from text: {e}")
                     availability = "Check Store"

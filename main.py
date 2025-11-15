@@ -1313,6 +1313,16 @@ async def aggregate_products(
                             availability = "IN_STOCK"
                         else:
                             availability = "CHECK_STORE"
+                    elif store_id == "aldi":
+                        # For ALDI: If product has price, assume IN_STOCK
+                        # ALDI shows products with prices when available
+                        if price:
+                            availability = "IN_STOCK"
+                        elif offer.get("product_url") and "aldi.us/product/" in offer.get("product_url", "") and "/products/" not in offer.get("product_url", ""):
+                            # If it's a valid ALDI product URL (not category page), assume available
+                            availability = "IN_STOCK"
+                        else:
+                            availability = "CHECK_STORE"
                     else:
                         availability = "CHECK_STORE"
                     
