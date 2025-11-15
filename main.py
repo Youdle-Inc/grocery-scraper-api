@@ -706,7 +706,7 @@ async def search_products(
     - Building shopping lists with optimal store selection
 
     **Default Stores (when no stores parameter provided):**
-    walmart, kroger (or Mariano's in Chicago area), aldi, wegmans
+    walmart, aldi, wegmans
     
     **Available Stores:**
     target, walmart, whole_foods, kroger, aldi, costco, trader_joes, sams_club, safeway, albertsons, publix, heb, wegmans
@@ -733,7 +733,7 @@ async def aggregate_products(
             user_store_ids = [s.strip().lower() for s in stores.split(",") if s.strip()]
 
         # Default major grocery store chains
-        default_stores = ["walmart", "kroger", "aldi", "wegmans"]
+        default_stores = ["walmart", "aldi", "wegmans"]
         considered_store_ids = user_store_ids[:10] if user_store_ids else default_stores
 
         # Helper functions for data normalization (needed for cache transformation)
@@ -1287,6 +1287,11 @@ async def aggregate_products(
                     else:
                         fulfillment = ["IN_STORE"]
                     
+                    # Determine prices first (needed for Wegmans availability check)
+                    regular_price = None
+                    sale_price = None
+                    price = offer.get("price")
+                    
                     # Determine availability
                     availability = offer.get("availability", "CHECK_STORE")
                     if availability and "stock" in availability.lower():
@@ -1296,13 +1301,22 @@ async def aggregate_products(
                             availability = "LOW_STOCK"
                         else:
                             availability = "IN_STOCK"
+                    elif availability and availability.lower() == "in stock":
+                        availability = "IN_STOCK"
+                    elif store_id == "wegmans":
+                        # For Wegmans: If product has price and is store-filtered, assume IN_STOCK
+                        # Wegmans shows products filtered by zipcode/store, so if it appears, it's available
+                        if price:
+                            availability = "IN_STOCK"
+                        elif offer.get("product_url") and "wegmans.com/shop/product/" in offer.get("product_url", ""):
+                            # If it's a valid Wegmans product URL, assume available (store-filtered)
+                            availability = "IN_STOCK"
+                        else:
+                            availability = "CHECK_STORE"
                     else:
                         availability = "CHECK_STORE"
                     
-                    # Determine prices
-                    regular_price = None
-                    sale_price = None
-                    price = offer.get("price")
+                    # Set regular_price from price
                     if price:
                         if isinstance(price, (int, float)):
                             regular_price = float(price)

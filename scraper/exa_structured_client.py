@@ -153,6 +153,12 @@ class ExaStructuredClient:
         
         # Add location information if zipcode is provided
         if zipcode:
+            # For Wegmans, include store-specific URL pattern with zipcode
+            if store_name and store_name.lower() == "wegmans":
+                # Wegmans search URLs support store parameter: /shop/search?query=X&store=ZIPCODE
+                # This helps Exa find products available at that specific store location
+                base_query = f"{base_query} site:wegmans.com/shop/search store {zipcode} site:wegmans.com/shop/product"
+            
             # Get city/state from zipcode for better location context
             city, state = self._get_city_state_from_zipcode(zipcode)
             if city and state:
@@ -461,6 +467,26 @@ class ExaStructuredClient:
                 logger.debug(f"Filtering out gift card: {title[:60]}... (URL: {url[:60]}...)")
                 return False
 
+        # Wegmans-specific filtering - only include actual product pages
+        if 'wegmans.com' in url_lower:
+            # Wegmans product pages are at /shop/product/{id}-{name}
+            if '/shop/product/' in url_lower:
+                # Exclude store location pages, sitemaps, FAQs, etc.
+                exclude_wegmans = [
+                    '/stores/',
+                    '/sitemap',
+                    '/service/',
+                    '/faq',
+                    '/about',
+                    '/privacy',
+                    '/terms',
+                    '/recipes',
+                    '/pharmacy',
+                ]
+                if not any(exclude in url_lower for exclude in exclude_wegmans):
+                    return True
+            return False
+        
         # Check for product page indicators
         product_indicators = [
             '/p/',  # Target product pages
@@ -469,7 +495,6 @@ class ExaStructuredClient:
             '/product/',  # Generic product pages
             '/products/',  # Generic products pages
             '/item/',  # Item pages
-            '/store/',  # Store pages (might be product pages)
         ]
 
         for indicator in product_indicators:
@@ -543,6 +568,10 @@ class ExaStructuredClient:
 
             if not self._is_product_page(url, title):
                 logger.debug(f"Skipping non-product page: {title[:60]}... (URL: {url[:60]}...)")
+                # For Wegmans, be strict - only allow /shop/product/ URLs
+                if 'wegmans.com' in url.lower():
+                    logger.debug(f"Filtering out Wegmans non-product URL: {url[:60]}...")
+                    return None
                 # For now, let's be less strict and include results that might be products
                 # Only skip obvious search/category pages
                 if any(exclude in url.lower() for exclude in ['/search', '/category', '/browse', '/s/', '/c/']):
@@ -1010,6 +1039,19 @@ class ExaStructuredClient:
             if "walmart.com" in url_lower:
                 if any(phrase in text_lower for phrase in ["add to cart", "free pickup", "free delivery"]):
                     return "In Stock"
+            
+            # Wegmans-specific patterns
+            if "wegmans.com" in url_lower:
+                # Wegmans shows products filtered by store location
+                # If product appears on page with store context, it's typically available
+                # Look for "Add to List" button (indicates product is available)
+                if any(phrase in text_lower for phrase in ["add to list", "add to cart", "price is:", "unit price is:"]):
+                    # If we have a price and "Add to List", product is likely in stock
+                    if "$" in text or "price" in text_lower:
+                        return "In Stock"
+                # Check for out of stock indicators
+                if any(phrase in text_lower for phrase in ["out of stock", "unavailable", "not available", "sold out"]):
+                    return "Out of Stock"
         
         # Default: Check Store (when we can't determine)
         return "Check Store"
@@ -1029,6 +1071,19 @@ class ExaStructuredClient:
             title = getattr(result, "title", "Unknown Product")
             url = getattr(result, "url", None)
             text = getattr(result, "text", "")[:1500] if hasattr(result, "text") else ""  # Reduced from 3000 to 1500
+            
+            # Wegmans-specific: Extract product name from URL if title is generic
+            if url and 'wegmans.com/shop/product/' in url.lower():
+                # URL format: /shop/product/{id}-{name}
+                # Extract name from URL if title is generic
+                url_match = re.search(r'/shop/product/\d+-(.+)', url)
+                if url_match:
+                    url_product_name = url_match.group(1).replace('-', ' ').title()
+                    # If title is generic (like "Wegmans", "Product Information", etc.), use URL name
+                    generic_titles = ['wegmans', 'product information', 'faqs', 'faq', 'loading', 'wegmans food markets']
+                    if title.lower() in generic_titles or len(title) < 10:
+                        title = url_product_name
+                        logger.debug(f"✅ Extracted Wegmans product name from URL: {title}")
             
             # Try to use store-specific extractor if we have HTML content
             # This is especially useful for search result pages
@@ -1368,6 +1423,12 @@ class ExaStructuredClient:
             if not availability or availability == "Check Store":
                 try:
                     availability = self._extract_availability(text, title, url)
+                    # For Wegmans: If product has price and URL, assume in stock (products are store-filtered)
+                    if url and "wegmans.com" in url.lower() and availability == "Check Store":
+                        if price or "$" in text:
+                            # Wegmans shows products filtered by store/zipcode, so if it appears, it's available
+                            availability = "In Stock"
+                            logger.debug(f"✅ Wegmans product with price detected - assuming In Stock for store-filtered product")
                 except Exception as e:
                     logger.debug(f"Failed to extract availability from text: {e}")
                     availability = "Check Store"
