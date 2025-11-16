@@ -49,6 +49,7 @@ from scraper.models import (
 from scraper.image_scraper import ImageScraper
 from scraper.ai_scraper import AIScraper
 from scraper.html_image_extractor import HTMLImageExtractor
+from scraper.web_search_service import WebSearchService
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -95,6 +96,7 @@ try:
     set_image_cache(image_cache)  # Make it available to ExaStructuredClient
     location_service = LocationService()
     ai_scraper = AIScraper()  # AI-powered scraper for direct price extraction
+    web_search_service = WebSearchService(exa_client=exa_client)  # Web search for price verification
     
     # Debug: Check client status
     logger.info(f"🔍 ExaStructuredClient initialized: {exa_client.is_available()}")
@@ -108,6 +110,7 @@ except Exception as e:
     image_cache = None
     location_service = None
     ai_scraper = None
+    web_search_service = None
 
 # Create FastAPI app
 # Note: Removed lifespan for Vercel compatibility - serverless functions don't support startup/shutdown events
@@ -552,6 +555,25 @@ async def search_products(
             except Exception as e:
                 logger.debug(f"Failed to cache product images: {e}")
         
+        # Verify prices using web search for products without prices (especially ALDI, Wegmans)
+        if products and web_search_service:
+            try:
+                # Only verify prices for products that don't have prices yet
+                products_to_verify = [p for p in products if not p.get("price") and p.get("product_url")]
+                if products_to_verify:
+                    logger.info(f"🔍 Verifying prices for {len(products_to_verify)} products using web search...")
+                    verified_products = await web_search_service.batch_verify_prices(products_to_verify)
+                    # Update original products list with verified prices
+                    for i, product in enumerate(products):
+                        if not product.get("price") and product.get("product_url"):
+                            verified = next((p for p in verified_products if p.get("product_url") == product.get("product_url")), None)
+                            if verified and verified.get("price"):
+                                product["price"] = verified.get("price")
+                                product["price_source"] = "web_search_verified"
+                                logger.debug(f"✅ Verified price for {product.get('name', 'Unknown')}: ${product['price']}")
+            except Exception as e:
+                logger.warning(f"Price verification failed: {e}")
+        
         # Determine source for response
         source = "exa_structured"
         if store_name and products:
@@ -600,6 +622,77 @@ async def search_products(
             "api_version": "2.0.0"
         }
 
+@app.get(
+    "/products/verify-price",
+    tags=["🛒 Products"],
+    summary="Verify Product Price via Web Search",
+    description="""
+    Verify and extract accurate price from a product URL using web search.
+    
+    This endpoint uses Exa's structured extraction to get the exact price from the product page.
+    Useful for verifying prices that may have been incorrectly extracted or are missing.
+    
+    **Parameters:**
+    - `url` (required): Product page URL
+    - `product_name` (optional): Product name for better context
+    
+    **Example:**
+    ```
+    GET /products/verify-price?url=https://www.aldi.us/product/strawberries-1-lb-0000000000003798
+    ```
+    
+    **Response:**
+    ```json
+    {
+      "price": 4.65,
+      "currency": "USD",
+      "source": "web_search",
+      "url": "https://www.aldi.us/product/strawberries-1-lb-0000000000003798"
+    }
+    ```
+    """,
+)
+async def verify_price(
+    url: str = Query(..., description="Product page URL"),
+    product_name: Optional[str] = Query(None, description="Product name (optional)")
+):
+    """Verify product price using web search"""
+    if not web_search_service:
+        raise HTTPException(
+            status_code=503,
+            detail="Web search service not available"
+        )
+    
+    try:
+        # Extract store name from URL if possible
+        store_name = None
+        if "aldi.us" in url:
+            store_name = "ALDI"
+        elif "wegmans.com" in url:
+            store_name = "Wegmans"
+        elif "target.com" in url:
+            store_name = "Target"
+        elif "walmart.com" in url:
+            store_name = "Walmart"
+        
+        result = await web_search_service.verify_product_price(
+            product_url=url,
+            product_name=product_name,
+            store_name=store_name
+        )
+        
+        if result:
+            return result
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail="Could not extract price from the provided URL"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Price verification error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get(
     "/products/aggregate",
