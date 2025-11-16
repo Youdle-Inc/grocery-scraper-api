@@ -779,7 +779,7 @@ async def verify_price(
     - Building shopping lists with optimal store selection
 
     **Default Stores (when no stores parameter provided):**
-    walmart, aldi, wegmans
+    walmart, aldi, kroger
     
     **Available Stores:**
     target, walmart, whole_foods, kroger, aldi, costco, trader_joes, sams_club, safeway, albertsons, publix, heb, wegmans
@@ -806,7 +806,7 @@ async def aggregate_products(
             user_store_ids = [s.strip().lower() for s in stores.split(",") if s.strip()]
 
         # Default major grocery store chains
-        default_stores = ["walmart", "aldi", "wegmans"]
+        default_stores = ["walmart", "aldi", "kroger"]
         requested_store_ids = user_store_ids[:10] if user_store_ids else default_stores
         
         # Filter stores by location availability
@@ -828,7 +828,7 @@ async def aggregate_products(
                         "cache": {"hit": False},
                         "stores_searched": [],
                         "stores_available": location_service.filter_stores_by_location(
-                            ["walmart", "target", "aldi", "kroger", "costco", "whole_foods", "sams_club", 
+                            ["walmart", "target", "aldi", "kroger", "marianos", "costco", "whole_foods", "sams_club", 
                              "trader_joes", "safeway", "albertsons", "wegmans", "publix", "heb", "giant_eagle",
                              "meijer", "hy_vee", "sprouts"],
                             zipcode
@@ -839,7 +839,7 @@ async def aggregate_products(
             # Get all available stores for this zipcode (for UI display)
             # This includes all nationwide stores + regional stores available in zipcode
             all_available_store_ids = location_service.filter_stores_by_location(
-                ["walmart", "target", "aldi", "kroger", "costco", "whole_foods", "sams_club", 
+                ["walmart", "target", "aldi", "kroger", "marianos", "costco", "whole_foods", "sams_club", 
                  "trader_joes", "safeway", "albertsons", "wegmans", "publix", "heb", "giant_eagle",
                  "meijer", "hy_vee", "sprouts"],
                 zipcode
@@ -1080,18 +1080,26 @@ async def aggregate_products(
                     "offers": []
                 }
                 
-                # Add image to canonical product if not already there
-                if product.get("image_url"):
+                # Helper function to check if image is Wegmans logo
+                def is_wegmans_logo(image_url: Optional[str]) -> bool:
+                    if not image_url:
+                        return False
+                    image_lower = image_url.lower()
+                    return 'wegmans-og-share-img' in image_lower or '53100' in image_url
+                
+                # Add image to canonical product if not already there (filter out Wegmans logos)
+                if product.get("image_url") and not is_wegmans_logo(product["image_url"]):
                     canonical_images = grouped[gkey]["canonical_product"]["images"]
                     if product["image_url"] not in canonical_images:
                         canonical_images.append(product["image_url"])
                 
-                # Add additional images
+                # Add additional images (filter out Wegmans logos)
                 if product.get("additional_images"):
                     for img in product["additional_images"]:
-                        canonical_images = grouped[gkey]["canonical_product"]["images"]
-                        if img not in canonical_images:
-                            canonical_images.append(img)
+                        if not is_wegmans_logo(img):
+                            canonical_images = grouped[gkey]["canonical_product"]["images"]
+                            if img not in canonical_images:
+                                canonical_images.append(img)
                 
                 # Add offer
                 grouped[gkey]["offers"].append({
@@ -1160,13 +1168,33 @@ async def aggregate_products(
                 return None
 
         # Collect all product URLs that need images
+        # Also filter out Wegmans logo images that might have been incorrectly set
         urls_needing_images = []
         url_to_offer_map = {}  # Map product_url -> list of (group_key, offer_index)
+        
+        def is_wegmans_logo_image(image_url: Optional[str]) -> bool:
+            """Check if image URL is a Wegmans logo/share image"""
+            if not image_url:
+                return False
+            image_lower = image_url.lower()
+            return 'wegmans-og-share-img' in image_lower or '53100' in image_url
         
         for group_key, group in grouped.items():
             for offer_idx, offer in enumerate(group["offers"]):
                 product_url = offer.get("product_url")
-                if product_url and not offer.get("image_url"):
+                image_url = offer.get("image_url")
+                
+                # If image is Wegmans logo, mark as needing replacement
+                if image_url and is_wegmans_logo_image(image_url):
+                    logger.debug(f"🔄 Filtering out Wegmans logo image: {image_url[:80]}...")
+                    offer["image_url"] = None  # Clear the logo image
+                
+                # For Wegmans, always fetch product pages to get real images (even if image_url exists)
+                # This ensures we get product images from the actual product page, not search results
+                is_wegmans = product_url and 'wegmans.com' in product_url.lower() and '/shop/product/' in product_url.lower()
+                
+                # Add to list if no image OR if it's a Wegmans product (to fetch from product page)
+                if product_url and (not offer.get("image_url") or is_wegmans):
                     if product_url not in url_to_offer_map:
                         url_to_offer_map[product_url] = []
                         urls_needing_images.append(product_url)
@@ -1194,28 +1222,99 @@ async def aggregate_products(
                 for group_key, offer_idx in url_to_offer_map[product_url]:
                     grouped[group_key]["offers"][offer_idx]["image_url"] = image_url
 
-        # PRIORITY 3: HTML scraper for remaining missing images
+        # PRIORITY 3: AI scraper for Wegmans products (more reliable than HTML parsing)
         remaining_urls = [url for url in urls_needing_images if url not in exa_image_results or not exa_image_results[url]]
+        ai_image_results = {}
+        wegmans_urls = [url for url in remaining_urls if 'wegmans.com' in url.lower() and '/shop/product/' in url.lower()]
+        
+        # Always try AI scraper first if available, but don't block if it's not
+        if wegmans_urls and ai_scraper.is_available():
+            logger.info(f"🤖 Using AI scraper to extract images from {len(wegmans_urls)} Wegmans product pages...")
+            try:
+                async def extract_with_ai(url: str):
+                    try:
+                        data = await ai_scraper.extract_product_data(url, store_name="Wegmans")
+                        image_url = data.get("image_url")
+                        if image_url:
+                            logger.debug(f"✅ AI extracted image for {url[:60]}...: {image_url[:80]}...")
+                        return image_url
+                    except Exception as e:
+                        logger.debug(f"AI extraction failed for {url}: {e}")
+                        return None
+                
+                # Process Wegmans URLs with AI scraper (limit concurrent to avoid rate limits)
+                semaphore = asyncio.Semaphore(3)
+                async def process_wegmans_url(url: str):
+                    async with semaphore:
+                        image_url = await extract_with_ai(url)
+                        if image_url:
+                            ai_image_results[url] = image_url
+                
+                await asyncio.gather(*[process_wegmans_url(url) for url in wegmans_urls[:10]])  # Limit to 10
+                logger.info(f"✅ AI scraper complete: {sum(1 for v in ai_image_results.values() if v)}/{len(ai_image_results)} images found")
+            except Exception as e:
+                logger.warning(f"⚠️ AI image extraction failed: {e}")
+        elif wegmans_urls:
+            logger.info(f"⚠️ AI scraper not available (no API keys), will use HTML scraper for {len(wegmans_urls)} Wegmans URLs")
+        
+        # Update offers with AI scraper images
+        for product_url, image_url in ai_image_results.items():
+            if image_url and product_url in url_to_offer_map:
+                # Filter out Wegmans logos (AI should handle this, but double-check)
+                if 'wegmans-og-share-img' not in image_url.lower() and '53100' not in image_url:
+                    for group_key, offer_idx in url_to_offer_map[product_url]:
+                        grouped[group_key]["offers"][offer_idx]["image_url"] = image_url
+                        logger.debug(f"✅ Updated offer image from AI scraper: {image_url[:80]}...")
+                else:
+                    logger.debug(f"🔄 Filtered out Wegmans logo from AI scraper: {image_url[:80]}...")
+        
+        # PRIORITY 4: HTML scraper for remaining missing images (non-Wegmans or fallback)
+        # Also include Wegmans URLs that didn't get AI extraction (fallback)
+        remaining_urls = [url for url in remaining_urls if url not in ai_image_results or not ai_image_results[url]]
+        # Also add ALL Wegmans URLs that need images (even if AI was attempted)
+        wegmans_urls_for_html = [url for url in urls_needing_images if 'wegmans.com' in url.lower() and '/shop/product/' in url.lower() and (url not in ai_image_results or not ai_image_results[url])]
+        remaining_urls = list(set(remaining_urls + wegmans_urls_for_html))
+        
+        logger.info(f"📋 Image extraction status: Exa={len(exa_image_results)}, AI={len(ai_image_results)}, Remaining={len(remaining_urls)} (Wegmans={len(wegmans_urls_for_html)})")
+        
         html_image_results = {}
         if remaining_urls:
-            logger.info(f"🖼️ Fetching {len(remaining_urls)} images via HTML scraper...")
+            logger.info(f"🖼️ Fetching {len(remaining_urls)} images via HTML scraper (including {len(wegmans_urls_for_html)} Wegmans URLs)...")
+            logger.info(f"📋 Sample URLs: {remaining_urls[:2]}")
             try:
                 async with HTMLImageExtractor() as html_extractor:
                     html_image_results = await html_extractor.extract_images_batch(
                         remaining_urls,
                         max_concurrent=10  # Can do more concurrent requests with direct HTML scraping
                     )
-                logger.info(f"✅ HTML scraper complete: {sum(1 for v in html_image_results.values() if v)}/{len(html_image_results)} images found")
+                found_count = sum(1 for v in html_image_results.values() if v)
+                logger.info(f"✅ HTML scraper complete: {found_count}/{len(html_image_results)} images found")
+                # Log Wegmans-specific results
+                wegmans_html_results = {url: img for url, img in html_image_results.items() if 'wegmans.com' in url.lower()}
+                if wegmans_html_results:
+                    wegmans_found = sum(1 for v in wegmans_html_results.values() if v)
+                    logger.info(f"✅ Wegmans HTML extraction: {wegmans_found}/{len(wegmans_html_results)} images found")
+                    # Log specific results
+                    for url, img in list(wegmans_html_results.items())[:3]:
+                        if img:
+                            logger.info(f"  ✅ {url[:60]}... -> {img[:80]}...")
+                        else:
+                            logger.warning(f"  ❌ {url[:60]}... -> No image found")
             except Exception as e:
-                logger.warning(f"⚠️ HTML image extraction failed: {e}")
+                logger.error(f"⚠️ HTML image extraction failed: {e}", exc_info=True)
 
         # Update offers with HTML scraper images
         for product_url, image_url in html_image_results.items():
             if image_url and product_url in url_to_offer_map:
-                for group_key, offer_idx in url_to_offer_map[product_url]:
-                    grouped[group_key]["offers"][offer_idx]["image_url"] = image_url
+                # Filter out Wegmans logos
+                if 'wegmans-og-share-img' not in image_url.lower() and '53100' not in image_url:
+                    for group_key, offer_idx in url_to_offer_map[product_url]:
+                        grouped[group_key]["offers"][offer_idx]["image_url"] = image_url
+                        logger.info(f"✅ Updated offer image from HTML scraper for {product_url[:60]}...: {image_url[:80]}...")
+                else:
+                    logger.debug(f"🔄 Filtered out Wegmans logo from HTML scraper: {image_url[:80]}...")
 
-        # PRIORITY 4: URL pattern matching with validation (last resort)
+        # PRIORITY 5: URL pattern matching with validation (last resort)
         remaining_urls = [url for url in remaining_urls if url not in html_image_results or not html_image_results[url]]
         if remaining_urls:
             logger.info(f"🖼️ Trying URL pattern matching for {len(remaining_urls)} products...")
@@ -1251,20 +1350,33 @@ async def aggregate_products(
             canonical = group["canonical_product"]
             image_set = set()
 
-            # Collect all images from offers
+            # Collect all images from offers, filtering out Wegmans logos
+            def is_wegmans_logo_image(image_url: Optional[str]) -> bool:
+                """Check if image URL is a Wegmans logo/share image"""
+                if not image_url:
+                    return False
+                image_lower = image_url.lower()
+                return 'wegmans-og-share-img' in image_lower or '53100' in image_url
+
             for offer in group["offers"]:
                 img_url = offer.get("image_url")
-                if img_url:
+                if img_url and not is_wegmans_logo_image(img_url):
                     image_set.add(img_url)
+                elif img_url:
+                    logger.debug(f"🔄 Filtered out Wegmans logo in enrich_group_final: {img_url[:80]}...")
 
-            # Update canonical images
+            # Update canonical images (filtered)
             canonical["images"] = list(image_set) if image_set else []
+            if canonical["images"]:
+                logger.debug(f"✅ Collected {len(canonical['images'])} images for canonical product: {canonical.get('name', 'Unknown')[:50]}")
+            else:
+                logger.debug(f"⚠️ No images collected for canonical product: {canonical.get('name', 'Unknown')[:50]} (offers: {len(group['offers'])})")
 
             # Backfill any remaining missing offer image_urls with primary image
             if canonical["images"]:
                 primary = canonical["images"][0]
                 for offer in group["offers"]:
-                    if not offer.get("image_url"):
+                    if not offer.get("image_url") or is_wegmans_logo_image(offer.get("image_url")):
                         offer["image_url"] = primary
 
         # Final enrichment pass

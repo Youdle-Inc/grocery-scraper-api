@@ -59,6 +59,11 @@ class LocationService:
                 "07000-08999",  # NJ
                 "01000-02799",  # MA
                 "06000-06999",  # CT
+            ],
+            # Mariano's - Chicago area (Illinois)
+            "marianos": [
+                "60000-60999",  # Chicago suburbs (Cook, Lake, DuPage, Kane, McHenry counties)
+                "60601-60699",  # Chicago city
             ]
         }
     
