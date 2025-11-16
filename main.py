@@ -982,6 +982,32 @@ async def aggregate_products(
         
         logger.info(f"📊 Total products found across all stores: {total_products}")
 
+        # Verify prices using web search for products without prices (especially ALDI, Wegmans)
+        if web_search_service:
+            try:
+                # Collect all products that need price verification
+                products_to_verify = []
+                for result in store_results:
+                    for product in result.get("products", []):
+                        if not product.get("price") and product.get("product_url"):
+                            products_to_verify.append(product)
+                
+                if products_to_verify:
+                    logger.info(f"🔍 Verifying prices for {len(products_to_verify)} products in aggregate search using web search...")
+                    verified_products = await web_search_service.batch_verify_prices(products_to_verify)
+                    # Create lookup dict for verified prices
+                    verified_dict = {p.get("product_url"): p.get("price") for p in verified_products if p.get("price")}
+                    # Update products with verified prices
+                    for result in store_results:
+                        for product in result.get("products", []):
+                            product_url = product.get("product_url")
+                            if not product.get("price") and product_url and product_url in verified_dict:
+                                product["price"] = verified_dict[product_url]
+                                product["price_source"] = "web_search_verified"
+                                logger.debug(f"✅ Verified price for {product.get('name', 'Unknown')}: ${product['price']}")
+            except Exception as e:
+                logger.warning(f"Price verification failed in aggregate: {e}")
+
         # Aggregate products by canonical product
         grouped = {}
         for result in store_results:
