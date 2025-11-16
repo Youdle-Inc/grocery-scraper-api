@@ -88,9 +88,9 @@ class WalmartAPIClient:
                         logger.error("If the key has newlines, you may need to use \\n in your .env file or put it in quotes.")
                         self.private_key = None
                     else:
-                    logger.info("ℹ️ Walmart private key appears to be base64 only, adding PEM headers...")
-                    # Try PKCS#8 format first (what Walmart guide generates), then fall back to PKCS#1
-                    private_key_pem = f"-----BEGIN PRIVATE KEY-----\n{private_key_pem.strip()}\n-----END PRIVATE KEY-----"
+                        logger.info("ℹ️ Walmart private key appears to be base64 only, adding PEM headers...")
+                        # Try PKCS#8 format first (what Walmart guide generates), then fall back to PKCS#1
+                        private_key_pem = f"-----BEGIN PRIVATE KEY-----\n{private_key_pem.strip()}\n-----END PRIVATE KEY-----"
                 
                 # RSA.import_key handles both PKCS#1 (BEGIN RSA PRIVATE KEY) and PKCS#8 (BEGIN PRIVATE KEY)
                 self.private_key = RSA.import_key(private_key_pem)
