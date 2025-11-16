@@ -54,6 +54,7 @@ from scraper.html_image_extractor import HTMLImageExtractor
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 # Helper functions for address parsing
 def extract_city_from_address(address: str) -> Optional[str]:
     """Extract city from address string"""
@@ -83,7 +84,33 @@ def extract_state_from_address(address: str) -> Optional[str]:
     
     return None
 
+# Initialize services with error handling for Vercel compatibility
+try:
+    cache = Cache()
+    exa_client = ExaStructuredClient()
+    partner_api_client = PartnerAPIClient()  # Official partner APIs (Target, Kroger, Walmart)
+    
+    # Initialize image cache with fuzzy matching
+    image_cache = ProductImageCache(cache)
+    set_image_cache(image_cache)  # Make it available to ExaStructuredClient
+    location_service = LocationService()
+    ai_scraper = AIScraper()  # AI-powered scraper for direct price extraction
+    
+    # Debug: Check client status
+    logger.info(f"🔍 ExaStructuredClient initialized: {exa_client.is_available()}")
+    logger.info(f"🔑 API key loaded: {bool(exa_client.api_key)}")
+except Exception as e:
+    logger.error(f"❌ Failed to initialize services: {e}", exc_info=True)
+    # Initialize with None values to prevent crashes
+    cache = None
+    exa_client = None
+    partner_api_client = None
+    image_cache = None
+    location_service = None
+    ai_scraper = None
+
 # Create FastAPI app
+# Note: Removed lifespan for Vercel compatibility - serverless functions don't support startup/shutdown events
 app = FastAPI(
     title="Grocery Scraper API",
     description="""
@@ -153,56 +180,6 @@ app.add_middleware(
 
 # Mount static files
 # Static files removed for Vercel compatibility
-
-# Initialize services
-cache = Cache()
-exa_client = ExaStructuredClient()
-partner_api_client = PartnerAPIClient()  # Official partner APIs (Target, Kroger, Walmart)
-
-# Initialize image cache with fuzzy matching
-image_cache = ProductImageCache(cache)
-set_image_cache(image_cache)  # Make it available to ExaStructuredClient
-location_service = LocationService()
-ai_scraper = AIScraper()  # AI-powered scraper for direct price extraction
-
-# Debug: Check client status
-logger.info(f"🔍 ExaStructuredClient initialized: {exa_client.is_available()}")
-logger.info(f"🔑 API key loaded: {bool(exa_client.api_key)}")
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize the API on startup"""
-    logger.info("🚀 Starting Grocery Scraper API with Exa Integration...")
-    logger.info(f"🔍 Exa available: {exa_client.is_available()}")
-    logger.info(f"🔑 EXA_API_KEY loaded: {bool(os.getenv('EXA_API_KEY'))}")
-    logger.info(f"🌍 Environment: {os.getenv('ENVIRONMENT', 'development')}")
-    
-    # Log partner API status
-    logger.info("📡 Partner API Status:")
-    logger.info(f"  🎯 Target API: {'✅ Available' if partner_api_client.target_client.is_available() else '❌ Not configured'}")
-    logger.info(f"  🛒 Kroger API: {'✅ Available' if partner_api_client.kroger_client.is_available() else '❌ Not configured'}")
-    logger.info(f"  🏪 Walmart API: {'✅ Available' if partner_api_client.walmart_client.is_available() else '❌ Not configured'}")
-    
-    # Set up exception handler for background tasks
-    loop = asyncio.get_event_loop()
-    old_exception_handler = loop.get_exception_handler()
-    
-    def exception_handler(loop, context):
-        """Custom exception handler that suppresses harmless httpx cleanup errors"""
-        exception = context.get('exception')
-        if exception and isinstance(exception, RuntimeError):
-            if "Event loop is closed" in str(exception):
-                # Suppress httpx cleanup errors - they're harmless
-                logger.debug(f"Suppressed cleanup error: {exception}")
-                return
-        
-        # Call the default handler for other exceptions
-        if old_exception_handler:
-            old_exception_handler(loop, context)
-        else:
-            loop.default_exception_handler(context)
-    
-    loop.set_exception_handler(exception_handler)
 
 from fastapi.openapi.docs import get_redoc_html
 
@@ -350,12 +327,12 @@ async def get_stores_in_zipcode(
         
         # Try cache first
         cache_key = f"stores:{zipcode}:{store_chain or 'all'}"
-        cached = await cache.get_json(cache_key)
+        cached = await cache.get_json(cache_key) if cache else None
         if cached:
             logger.info(f"cache_hit stores zip={zipcode}")
             return {**cached, "cache": {"hit": True}}
 
-        if not exa_client.is_available():
+        if not exa_client or not exa_client.is_available():
             raise HTTPException(
                 status_code=503,
                 detail="Exa client not available - check API key configuration"
@@ -398,7 +375,8 @@ async def get_stores_in_zipcode(
         
         # Cache the results
         logger.info(f"cache_miss stores zip={zipcode} -> setting cache")
-        await cache.set_json(cache_key, response_payload, ttl_seconds=60*60*24*7)  # 1 week cache
+        if cache:
+            await cache.set_json(cache_key, response_payload, ttl_seconds=60*60*24*7)  # 1 week cache
         
         return {**response_payload, "cache": {"hit": False}}
         
@@ -495,7 +473,7 @@ async def search_products(
         
         # Check cache (skip if refresh requested)
         cache_key = f"products:{query}:{store_name or 'all'}:{zipcode or 'any'}:{num_results}"
-        cached = None if refresh else await cache.get_json(cache_key)
+        cached = None if refresh or not cache else await cache.get_json(cache_key)
         if cached and not refresh:
             logger.info(f"cache_hit products q='{query}'")
             return {**cached, "cache": {"hit": True}}
@@ -525,7 +503,7 @@ async def search_products(
                     store_id = "marianos"
                     logger.info(f"📍 Chicago area zipcode ({zipcode}) detected, mapping Kroger to Mariano's")
             
-            if partner_api_client.has_partner_api(store_id):
+            if partner_api_client and partner_api_client.has_partner_api(store_id):
                 logger.info(f"🎯 Using official {store_name} API for '{query}'")
                 try:
                     products = await partner_api_client.search_products(
@@ -543,7 +521,7 @@ async def search_products(
         
         # Fallback to Exa if no partner API or partner API returned no results
         if not products:
-            if not exa_client.is_available():
+            if not exa_client or not exa_client.is_available():
                 raise HTTPException(
                     status_code=503,
                     detail="Exa client not available - check API key configuration"
@@ -569,7 +547,8 @@ async def search_products(
         # Cache all products with images for future fuzzy matching
         if products:
             try:
-                await image_cache.cache_images_batch(products)
+                if image_cache:
+                    await image_cache.cache_images_batch(products)
             except Exception as e:
                 logger.debug(f"Failed to cache product images: {e}")
         
@@ -585,7 +564,7 @@ async def search_products(
                 "whole foods": "whole_foods",
             }
             store_id_normalized = store_id_map.get(store_id_normalized, store_id_normalized)
-            if partner_api_client.has_partner_api(store_id_normalized):
+            if partner_api_client and partner_api_client.has_partner_api(store_id_normalized):
                 source = "partner_api"
         
         response_payload = {
@@ -601,7 +580,8 @@ async def search_products(
         
         # Cache the results
         logger.info(f"cache_miss products q='{query}' -> setting cache")
-        await cache.set_json(cache_key, response_payload, ttl_seconds=60*60*4)  # 4 hours
+        if cache:
+            await cache.set_json(cache_key, response_payload, ttl_seconds=60*60*4)  # 4 hours
         
         return {**response_payload, "cache": {"hit": False}}
         
@@ -777,7 +757,7 @@ async def aggregate_products(
 
         # Cache lookup
         cache_key = f"aggregate:{zipcode}:{query}:{':'.join(sorted(considered_store_ids))}:limit{limit}"
-        cached = None if refresh else await cache.get_json(cache_key)
+        cached = None if refresh or not cache else await cache.get_json(cache_key)
         if cached and not refresh:
             logger.info(f"cache_hit aggregate zip={zipcode} q='{query}'")
             # Check if cached data is in enhanced format (has search_timestamp and meta)
@@ -849,7 +829,7 @@ async def aggregate_products(
                     products = []
                     
                     # Try official partner API first if available
-                    if partner_api_client.has_partner_api(store_id):
+                    if partner_api_client and partner_api_client.has_partner_api(store_id):
                         logger.info(f"🎯 Using official {store_name} API")
                         products = await partner_api_client.search_products(
                             store_id=store_id,
@@ -1424,7 +1404,8 @@ async def aggregate_products(
 
         # Cache the results (store enhanced format for future use)
         logger.info(f"cache_miss aggregate zip={zipcode} q='{query}' -> setting cache")
-        await cache.set_json(cache_key, enhanced_response, ttl_seconds=60 * 15)
+        if cache:
+            await cache.set_json(cache_key, enhanced_response, ttl_seconds=60 * 15)
         
         # Return enhanced format
         return enhanced_response

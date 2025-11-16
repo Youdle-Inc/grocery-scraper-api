@@ -11,14 +11,31 @@ import re
 import json
 from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
-from exa_py import Exa
+
+# Import Exa with error handling for missing dependencies
+try:
+    from exa_py import Exa
+    EXA_AVAILABLE = True
+except ImportError:
+    EXA_AVAILABLE = False
+    Exa = None
+    logging.getLogger(__name__).warning("⚠️ exa_py not installed - Exa features will be unavailable")
+
 # Prompt templates removed - using inline prompts
 
 # Import store-specific extractors
 from scraper.store_extractors import get_extractor
 
 load_dotenv()
-exa = Exa(os.getenv("EXA_API_KEY"))
+# Initialize exa client lazily to avoid errors if API key is missing
+exa = None
+if EXA_AVAILABLE:
+    try:
+        api_key = os.getenv("EXA_API_KEY")
+        if api_key:
+            exa = Exa(api_key)
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"⚠️ Failed to initialize global Exa client: {e}")
 logger = logging.getLogger(__name__)
 
 # Image cache will be initialized in main.py and passed in
@@ -57,15 +74,16 @@ class ExaStructuredClient:
         self.api_key = api_key or os.getenv("EXA_API_KEY")
         self._client = None
         
+        if not EXA_AVAILABLE or Exa is None:
+            logger.warning("⚠️ exa_py not available - Exa features will be disabled")
+            return
+        
         if not self.api_key:
             logger.warning("⚠️ No EXA_API_KEY found in environment")
         else:
             try:
-                if Exa:
-                    self._client = Exa(self.api_key)
-                    logger.info("✅ Exa structured client initialized")
-                else:
-                    logger.warning("⚠️ exa_py not installed")
+                self._client = Exa(self.api_key)
+                logger.info("✅ Exa structured client initialized")
             except Exception as e:
                 logger.error(f"❌ Failed to initialize Exa client: {e}")
     
