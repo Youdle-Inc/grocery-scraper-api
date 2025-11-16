@@ -51,7 +51,8 @@ class WebSearchService:
         
         try:
             # Use Exa's structured extraction to get price from the product page
-            price = await self.exa_client._get_price_from_exa(product_url)
+            # Pass store_name for better extraction accuracy
+            price = await self.exa_client._get_price_from_exa(product_url, store_name=store_name)
             
             if price:
                 logger.info(f"✅ Verified price from {product_url}: ${price}")

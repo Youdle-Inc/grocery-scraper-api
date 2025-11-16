@@ -880,10 +880,14 @@ class ExaStructuredClient:
         
         return None
     
-    async def _get_price_from_exa(self, url: Optional[str]) -> Optional[float]:
+    async def _get_price_from_exa(self, url: Optional[str], store_name: Optional[str] = None) -> Optional[float]:
         """
-        Get price from Exa using structured extraction.
+        Get price from Exa using structured extraction with store-specific optimizations.
         This makes an API call to Exa to get structured price data.
+        
+        Args:
+            url: Product page URL
+            store_name: Optional store name for better context
         
         Returns price as float or None if extraction fails.
         """
@@ -891,21 +895,70 @@ class ExaStructuredClient:
             return None
         
         try:
-            # Define schema focused on price
+            # Detect store from URL for better extraction hints
+            detected_store = None
+            if "aldi.us" in url:
+                detected_store = "ALDI"
+            elif "wegmans.com" in url:
+                detected_store = "Wegmans"
+            elif "target.com" in url:
+                detected_store = "Target"
+            elif "walmart.com" in url:
+                detected_store = "Walmart"
+            elif "wholefoodsmarket.com" in url:
+                detected_store = "Whole Foods"
+            
+            store_name = store_name or detected_store
+            
+            # Store-specific extraction hints for better accuracy
+            store_hints = {
+                "ALDI": "ALDI displays prices prominently near the product title, usually in format '$X.XX'. Look for the main product price, not unit prices.",
+                "Wegmans": "Wegmans shows prices in the product details section. Look for the current price, not sale prices unless that's the only price.",
+                "Target": "Target displays prices clearly in the product info section. Extract the main price shown.",
+                "Walmart": "Walmart shows prices prominently. Look for the current price displayed for the product.",
+                "Whole Foods": "Whole Foods may show prices with organic/premium indicators. Extract the main product price."
+            }
+            
+            store_hint = store_hints.get(store_name, "Extract the main product price displayed on the page.")
+            
+            # Define schema focused on price with better validation
             price_schema = {
                 "type": "object",
                 "properties": {
                     "price": {
                         "type": "number",
-                        "description": "Product price in USD. Extract the exact numeric price value (e.g., 4.99, 12.50, 29.99). Look for price displays, pricing sections, 'add to cart' prices, or any price indicators on the page. Return only the numeric value without currency symbols."
+                        "description": f"Product price in USD as a number (e.g., 4.65, 12.50, 29.99). {store_hint} Extract ONLY the main product price, not unit prices, sale prices, or 'was' prices. Return the numeric value without currency symbols."
                     },
                     "price_text": {
                         "type": "string",
-                        "description": "Original price text as displayed on page (e.g., '$4.99', '$12.50/lb', '29.99')"
+                        "description": "Original price text as displayed on page (e.g., '$4.65', '$12.50/lb', '29.99') for verification"
+                    },
+                    "confidence": {
+                        "type": "string",
+                        "enum": ["high", "medium", "low"],
+                        "description": "Confidence level in the extracted price"
                     }
                 },
                 "required": ["price"]
             }
+            
+            # Build optimized query with store context
+            query = f"""Extract the product price from this {store_name or 'grocery store'} product page.
+
+{store_hint}
+
+Focus on:
+1. Main product price (the price you pay for the product)
+2. Price displayed near "Add to Cart" or product title
+3. Current/active price (not "was" prices or sale prices unless that's the only price)
+
+Ignore:
+- Unit prices (per lb, per oz, etc.) unless that's the only price
+- "Was" prices or crossed-out prices
+- Shipping costs or additional fees
+- Prices from other products or related items
+
+Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12.50)."""
             
             response = await asyncio.get_event_loop().run_in_executor(
                 None,
@@ -913,7 +966,7 @@ class ExaStructuredClient:
                     [url],
                     text=True,
                     summary={
-                        "query": "Extract the product price from this product page. Look for price displays, pricing sections, 'add to cart' prices, sale prices, regular prices, or any price indicators. Return the exact numeric price value in USD (e.g., 4.99, 12.50, 29.99). Ignore unit prices or per-pound prices unless that's the only price shown.",
+                        "query": query,
                         "schema": price_schema
                     }
                 )
@@ -926,22 +979,43 @@ class ExaStructuredClient:
                     try:
                         summary_data = json.loads(result.summary)
                         exa_price = summary_data.get("price")
+                        confidence = summary_data.get("confidence", "medium")
+                        
                         if exa_price is not None:
                             try:
                                 price_value = float(exa_price)
                                 # Validate price is reasonable
                                 if 0.01 <= price_value <= 1000:
-                                    logger.debug(f"✅ Got price from Exa structured extraction: ${price_value}")
+                                    # Log with confidence level
+                                    confidence_msg = f" (confidence: {confidence})" if confidence else ""
+                                    logger.debug(f"✅ Got price from Exa structured extraction{' for ' + store_name if store_name else ''}: ${price_value}{confidence_msg}")
                                     return price_value
-                            except (ValueError, TypeError):
+                                else:
+                                    logger.debug(f"⚠️ Price out of range: ${price_value} (expected $0.01-$1000)")
+                            except (ValueError, TypeError) as ve:
+                                logger.debug(f"⚠️ Invalid price format: {exa_price} - {ve}")
                                 pass
-                    except (json.JSONDecodeError, AttributeError):
-                        # If summary is not JSON, try to extract from text
-                        pass
+                        else:
+                            logger.debug(f"⚠️ No price found in Exa extraction for {store_name or 'unknown store'}")
+                    except json.JSONDecodeError as je:
+                        logger.debug(f"⚠️ Failed to parse Exa JSON response: {je}")
+                        # Try to extract price from text as fallback
+                        if hasattr(result, "text") and result.text:
+                            price_match = re.search(r'\$(\d+\.\d{2})', result.text)
+                            if price_match:
+                                try:
+                                    fallback_price = float(price_match.group(1))
+                                    if 0.01 <= fallback_price <= 1000:
+                                        logger.debug(f"✅ Got price from text fallback: ${fallback_price}")
+                                        return fallback_price
+                                except (ValueError, TypeError):
+                                    pass
+                    except AttributeError as ae:
+                        logger.debug(f"⚠️ Missing attribute in Exa response: {ae}")
             
             return None
         except Exception as e:
-            logger.debug(f"Failed to get price from Exa for {url[:80]}...: {e}")
+            logger.debug(f"Failed to get price from Exa for {url[:80]}... ({store_name or 'unknown'}): {e}")
             return None
     
     async def _get_availability_from_exa(self, url: Optional[str]) -> Optional[str]:
@@ -1265,16 +1339,30 @@ class ExaStructuredClient:
             # This is especially important for Whole Foods and ALDI as their price format may vary
             is_whole_foods = url and "wholefoodsmarket.com" in url
             is_aldi = url and "aldi.us" in url
-            if (not price or is_whole_foods or is_aldi) and url:
+            is_wegmans = url and "wegmans.com" in url
+            
+            # Detect store name for better extraction
+            detected_store_name = None
+            if is_whole_foods:
+                detected_store_name = "Whole Foods"
+            elif is_aldi:
+                detected_store_name = "ALDI"
+            elif is_wegmans:
+                detected_store_name = "Wegmans"
+            elif url and "target.com" in url:
+                detected_store_name = "Target"
+            elif url and "walmart.com" in url:
+                detected_store_name = "Walmart"
+            
+            if (not price or is_whole_foods or is_aldi or is_wegmans) and url:
                 try:
-                    exa_price = await self._get_price_from_exa(url)
+                    exa_price = await self._get_price_from_exa(url, store_name=detected_store_name)
                     if exa_price:
-                        # For Whole Foods and ALDI, prefer Exa extraction (more reliable)
+                        # For Whole Foods, ALDI, and Wegmans, prefer Exa extraction (more reliable)
                         # For other stores, use Exa only if regex failed
-                        if is_whole_foods or is_aldi or not price:
+                        if is_whole_foods or is_aldi or is_wegmans or not price:
                             price = exa_price
-                            store_name = "Whole Foods" if is_whole_foods else ("ALDI" if is_aldi else "")
-                            logger.debug(f"✅ Got price from Exa structured extraction{' for ' + store_name if store_name else ''}: ${price}")
+                            logger.debug(f"✅ Got price from Exa structured extraction{' for ' + detected_store_name if detected_store_name else ''}: ${price}")
                 except Exception as e:
                     logger.debug(f"Failed to get price from Exa: {e}")
 
