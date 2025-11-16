@@ -807,7 +807,48 @@ async def aggregate_products(
 
         # Default major grocery store chains
         default_stores = ["walmart", "aldi", "wegmans"]
-        considered_store_ids = user_store_ids[:10] if user_store_ids else default_stores
+        requested_store_ids = user_store_ids[:10] if user_store_ids else default_stores
+        
+        # Filter stores by location availability
+        if location_service:
+            # Filter requested stores to only include those available in zipcode
+            considered_store_ids = location_service.filter_stores_by_location(requested_store_ids, zipcode)
+            
+            # If no stores available after filtering, return empty response
+            if not considered_store_ids:
+                logger.warning(f"⚠️ No stores available in zipcode {zipcode} from requested stores: {requested_store_ids}")
+                return {
+                    "query": query,
+                    "zipcode": zipcode,
+                    "search_timestamp": datetime.utcnow().isoformat() + "Z",
+                    "results": [],
+                    "stores_considered": [],
+                    "meta": {
+                        "api_version": "2.1.0",
+                        "cache": {"hit": False},
+                        "stores_searched": [],
+                        "stores_available": location_service.filter_stores_by_location(
+                            ["walmart", "target", "aldi", "kroger", "costco", "whole_foods", "sams_club", 
+                             "trader_joes", "safeway", "albertsons", "wegmans", "publix", "heb", "giant_eagle",
+                             "meijer", "hy_vee", "sprouts"],
+                            zipcode
+                        )
+                    }
+                }
+            
+            # Get all available stores for this zipcode (for UI display)
+            # This includes all nationwide stores + regional stores available in zipcode
+            all_available_store_ids = location_service.filter_stores_by_location(
+                ["walmart", "target", "aldi", "kroger", "costco", "whole_foods", "sams_club", 
+                 "trader_joes", "safeway", "albertsons", "wegmans", "publix", "heb", "giant_eagle",
+                 "meijer", "hy_vee", "sprouts"],
+                zipcode
+            )
+        else:
+            # Fallback if location_service not available
+            logger.warning("LocationService not available, skipping location filtering")
+            considered_store_ids = requested_store_ids
+            all_available_store_ids = requested_store_ids
 
         # Helper functions for data normalization (needed for cache transformation)
         def norm_text(s: Optional[str]) -> str:
@@ -848,7 +889,7 @@ async def aggregate_products(
             }
             return mapping.get(store_id, store_id.replace("_", " ").title())
 
-        # Cache lookup
+        # Cache lookup - use filtered stores in cache key
         cache_key = f"aggregate:{zipcode}:{query}:{':'.join(sorted(considered_store_ids))}:limit{limit}"
         cached = None if refresh or not cache else await cache.get_json(cache_key)
         if cached and not refresh:
@@ -891,12 +932,15 @@ async def aggregate_products(
                 await asyncio.gather(*[fetch_store_locations(sid) for sid in considered_store_ids], return_exceptions=True)
                 
                 # Transform to enhanced format
+                # Get available stores for cached response (use considered_store_ids as fallback)
+                cached_stores_available = all_available_store_ids if 'all_available_store_ids' in locals() else considered_store_ids
                 enhanced_cached = await transform_to_enhanced_format(
                     grouped_from_cache, 
                     considered_store_ids, 
                     query, 
                     zipcode, 
-                    store_locations_cache
+                    store_locations_cache,
+                    stores_available=cached_stores_available
                 )
                 enhanced_cached["meta"]["cache"] = {"hit": True}
                 # Apply limit if needed
@@ -1322,7 +1366,7 @@ async def aggregate_products(
         await asyncio.gather(*[fetch_store_locations(sid) for sid in considered_store_ids], return_exceptions=True)
         
         # Transform to enhanced format
-        async def transform_to_enhanced_format(grouped_results: Dict[str, Any], stores_considered: List[str], query: str, zipcode: str, store_locations: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        async def transform_to_enhanced_format(grouped_results: Dict[str, Any], stores_considered: List[str], query: str, zipcode: str, store_locations: Dict[str, Dict[str, Any]], stores_available: List[str] = None) -> Dict[str, Any]:
             """Transform grouped results to enhanced response format"""
             from datetime import datetime
             
@@ -1494,16 +1538,22 @@ async def aggregate_products(
                 }
                 enhanced_results.append(enhanced_product_dict)
             
+            meta = {
+                "api_version": "2.1.0",
+                "cache": {"hit": False},
+                "stores_searched": stores_considered,
+            }
+            
+            if stores_available:
+                meta["stores_available"] = stores_available
+            
             return {
                 "query": query,
                 "zipcode": zipcode,
                 "search_timestamp": search_timestamp,
                 "results": enhanced_results,
                 "stores_considered": stores_considered,
-                "meta": {
-                    "api_version": "2.1.0",
-                    "cache": {"hit": False}
-                }
+                "meta": meta
             }
         
         # Create both formats
@@ -1515,7 +1565,7 @@ async def aggregate_products(
             "source": "exa_structured_aggregate"
         }
         
-        enhanced_response = await transform_to_enhanced_format(grouped, considered_store_ids, query, zipcode, store_locations_cache)
+        enhanced_response = await transform_to_enhanced_format(grouped, considered_store_ids, query, zipcode, store_locations_cache, stores_available=all_available_store_ids)
 
         # Apply limit to results
         if limit and len(enhanced_response.get("results", [])) > limit:

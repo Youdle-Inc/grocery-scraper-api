@@ -155,6 +155,88 @@ class LocationService:
         """Validate zipcode format"""
         return bool(re.match(r'^\d{5}$', zipcode))
     
+    def _get_nationwide_stores(self) -> Set[str]:
+        """Get set of nationwide store IDs that are always available"""
+        return {
+            "walmart", "target", "aldi", "kroger", "costco", 
+            "whole_foods", "sams_club", "trader_joes", "safeway", "albertsons"
+        }
+    
+    def _normalize_store_id(self, store_id: str) -> str:
+        """Normalize store ID using aliases"""
+        normalized = store_id.lower().strip().replace(" ", "_")
+        return STORE_ALIASES.get(normalized, normalized)
+    
+    def is_store_available_in_zipcode(self, store_id: str, zipcode: str) -> bool:
+        """
+        Check if a store is available in the given zipcode.
+        
+        Args:
+            store_id: Store identifier (e.g., "walmart", "wegmans")
+            zipcode: 5-digit ZIP code
+            
+        Returns:
+            True if store is available in zipcode, False otherwise
+        """
+        try:
+            # Validate zipcode format
+            if not self.validate_zipcode(zipcode):
+                logger.warning(f"Invalid zipcode format: {zipcode}")
+                return False
+            
+            # Normalize store ID
+            normalized_id = self._normalize_store_id(store_id)
+            
+            # Nationwide stores are always available
+            nationwide_stores = self._get_nationwide_stores()
+            if normalized_id in nationwide_stores:
+                return True
+            
+            # Check regional store coverage
+            if normalized_id in self.store_coverage:
+                zipcode_int = int(zipcode)
+                return self._zipcode_in_range(zipcode_int, self.store_coverage[normalized_id])
+            
+            # If store not in coverage map, assume it's available (fallback for stores without coverage data)
+            logger.debug(f"Store {normalized_id} not in coverage map, assuming available")
+            return True
+            
+        except ValueError:
+            logger.error(f"Invalid zipcode format: {zipcode}")
+            return False
+        except Exception as e:
+            logger.error(f"Error checking store availability for {store_id} in {zipcode}: {e}")
+            return False
+    
+    def filter_stores_by_location(self, store_ids: List[str], zipcode: str) -> List[str]:
+        """
+        Filter a list of store IDs to only include stores available in the given zipcode.
+        
+        Args:
+            store_ids: List of store identifiers to filter
+            zipcode: 5-digit ZIP code
+            
+        Returns:
+            Filtered list of store IDs that are available in the zipcode
+        """
+        if not store_ids:
+            return []
+        
+        available_stores = []
+        filtered_out = []
+        
+        for store_id in store_ids:
+            if self.is_store_available_in_zipcode(store_id, zipcode):
+                available_stores.append(store_id)
+            else:
+                filtered_out.append(store_id)
+        
+        if filtered_out:
+            logger.info(f"📍 Filtered out {len(filtered_out)} stores not available in {zipcode}: {filtered_out}")
+        
+        logger.info(f"✅ {len(available_stores)} stores available in {zipcode}: {available_stores}")
+        return available_stores
+    
     def get_store_services(self, store_id: str) -> List[str]:
         """Get available services for a store (delivery, pickup, etc.)"""
         # This will be enhanced with additional store data
