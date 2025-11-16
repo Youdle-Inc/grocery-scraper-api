@@ -10,6 +10,7 @@ import logging
 import re
 import json
 from typing import Dict, List, Any, Optional
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 from dotenv import load_dotenv
 
 # Import Exa with error handling for missing dependencies
@@ -192,6 +193,20 @@ class ExaStructuredClient:
         base_query = f"{base_query} -gift card -giftcard -gift-card -non-food -non food"
 
         return base_query
+
+    def _add_or_replace_query_param(self, url: str, key: str, value: str) -> str:
+        """Return URL with query param added/replaced; fall back to original on error."""
+        try:
+            parsed = urlparse(url)
+            qs = parse_qs(parsed.query)
+            if qs.get(key) == [value]:
+                return url
+            qs[key] = [value]
+            new_query = urlencode(qs, doseq=True)
+            return urlunparse(parsed._replace(query=new_query))
+        except Exception as e:
+            logger.debug(f"Failed to add query param {key}={value} to {url[:80]}...: {e}")
+            return url
     
     def _detect_search_context(self, query: str) -> str:
         """Detect search context from user query"""
@@ -357,7 +372,6 @@ class ExaStructuredClient:
                 "text": {"max_characters": 1500}  # Reduced from 3000 to 1500 for faster processing
                 # Note: extras/image_links is only available in get_contents, not search_and_contents
             }
-            
             logger.debug(f"Exa search options: {search_options}")
 
             # Add domain filter if store specified
@@ -1200,6 +1214,13 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
             title = getattr(result, "title", "Unknown Product")
             url = getattr(result, "url", None)
             text = getattr(result, "text", "")[:1500] if hasattr(result, "text") else ""  # Reduced from 3000 to 1500
+            
+            # Wegmans needs a store context to show real prices; add zipcode as store param when missing
+            if zipcode and url and 'wegmans.com' in url.lower():
+                updated_url = self._add_or_replace_query_param(url, "store", zipcode)
+                if updated_url != url:
+                    logger.debug(f"🔄 Added Wegmans store context ({zipcode}) to product URL for price extraction")
+                    url = updated_url
             
             # Wegmans-specific: Extract product name from URL if title is generic
             if url and 'wegmans.com/shop/product/' in url.lower():
@@ -2231,4 +2252,3 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
         except Exception as e:
             logger.error(f"❌ Store location search failed: {e}")
             return []
-
