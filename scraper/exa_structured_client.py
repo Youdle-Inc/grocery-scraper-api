@@ -1261,18 +1261,20 @@ class ExaStructuredClient:
                     except:
                         pass
             
-            # Priority: Use Exa structured extraction for Whole Foods (always) or if regex failed
-            # This is especially important for Whole Foods as their price format may vary
+            # Priority: Use Exa structured extraction for Whole Foods and ALDI (always) or if regex failed
+            # This is especially important for Whole Foods and ALDI as their price format may vary
             is_whole_foods = url and "wholefoodsmarket.com" in url
-            if (not price or is_whole_foods) and url:
+            is_aldi = url and "aldi.us" in url
+            if (not price or is_whole_foods or is_aldi) and url:
                 try:
                     exa_price = await self._get_price_from_exa(url)
                     if exa_price:
-                        # For Whole Foods, prefer Exa extraction (more reliable)
+                        # For Whole Foods and ALDI, prefer Exa extraction (more reliable)
                         # For other stores, use Exa only if regex failed
-                        if is_whole_foods or not price:
+                        if is_whole_foods or is_aldi or not price:
                             price = exa_price
-                            logger.debug(f"✅ Got price from Exa structured extraction{' for Whole Foods' if is_whole_foods else ''}: ${price}")
+                            store_name = "Whole Foods" if is_whole_foods else ("ALDI" if is_aldi else "")
+                            logger.debug(f"✅ Got price from Exa structured extraction{' for ' + store_name if store_name else ''}: ${price}")
                 except Exception as e:
                     logger.debug(f"Failed to get price from Exa: {e}")
 
