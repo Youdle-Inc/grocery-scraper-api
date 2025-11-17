@@ -532,6 +532,242 @@ class WholeFoodsExtractor(StoreProductExtractor):
         return None
 
 
+class WegmansExtractor(StoreProductExtractor):
+    """Extractor for Wegmans.com product cards from search results"""
+    
+    def extract_products(self, html: str, store_id: str = "wegmans") -> List[Dict[str, Any]]:
+        """Extract products from Wegmans search results HTML"""
+        products = []
+        
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            # Wegmans search results might be in JSON-LD structured data
+            json_ld_scripts = soup.find_all('script', type='application/ld+json')
+            for script in json_ld_scripts:
+                try:
+                    import json
+                    data = json.loads(script.string)
+                    # Check if it's a product list
+                    if isinstance(data, dict) and data.get('@type') == 'ItemList':
+                        items = data.get('itemListElement', [])
+                        for item in items:
+                            if isinstance(item, dict) and item.get('@type') == 'Product':
+                                product = self._extract_from_json_ld(item, store_id)
+                                if product:
+                                    products.append(product)
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    continue
+            
+            # Also try to find product cards in HTML
+            # Wegmans might use various selectors - try common patterns
+            product_selectors = [
+                '[class*="product"]',
+                '[data-testid*="product"]',
+                '[class*="ProductCard"]',
+                '[class*="product-card"]',
+                '[class*="productTile"]',
+                '[class*="product-tile"]',
+            ]
+            
+            for selector in product_selectors:
+                cards = soup.select(selector)
+                if cards:
+                    logger.debug(f"Found {len(cards)} Wegmans product cards with selector: {selector}")
+                    for card in cards[:20]:  # Limit to first 20
+                        try:
+                            product = self._extract_product(card, store_id)
+                            if product:
+                                products.append(product)
+                        except Exception as e:
+                            logger.debug(f"Failed to extract Wegmans product: {e}")
+                            continue
+                    if products:
+                        break  # If we found products, stop trying other selectors
+            
+            # Also try to extract from script tags that might contain product data
+            script_tags = soup.find_all('script')
+            for script in script_tags:
+                script_text = script.string or ''
+                # Look for product data in JavaScript variables
+                if 'product' in script_text.lower() and ('image' in script_text.lower() or 'price' in script_text.lower()):
+                    try:
+                        # Try to extract JSON-like structures
+                        json_matches = re.findall(r'\{[^{}]*"name"[^{}]*"price"[^{}]*\}', script_text, re.IGNORECASE)
+                        for match in json_matches[:5]:  # Limit matches
+                            try:
+                                import json
+                                product_data = json.loads(match)
+                                if product_data.get('name') or product_data.get('price'):
+                                    product = self._extract_from_dict(product_data, store_id)
+                                    if product:
+                                        products.append(product)
+                            except:
+                                continue
+                    except Exception:
+                        continue
+            
+        except Exception as e:
+            logger.error(f"Failed to parse Wegmans HTML: {e}")
+        
+        return products
+    
+    def _extract_product(self, card, store_id: str) -> Optional[Dict[str, Any]]:
+        """Extract a single product from Wegmans product card"""
+        product = {
+            'store_id': store_id,
+            'store_name': 'Wegmans',
+            'name': None,
+            'price': None,
+            'price_display': None,
+            'price_per_unit': None,
+            'image_url': None,
+            'product_url': None,
+            'availability': 'Check Store'
+        }
+        
+        # Extract product name
+        name_el = card.select_one('h3, h2, h4, [class*="title"], [class*="name"], [class*="product-name"]')
+        if name_el:
+            product['name'] = name_el.get_text(strip=True)
+        
+        # Also try data attributes
+        if not product['name']:
+            product['name'] = card.get('data-product-name') or card.get('aria-label')
+        
+        # Extract price
+        price_el = card.select_one('[class*="price"], [class*="Price"], [data-testid*="price"]')
+        if price_el:
+            price_text = price_el.get_text(strip=True)
+            product['price_display'] = price_text
+            product['price'] = self._normalize_price(price_text)
+        
+        # Also try data attributes for price
+        if not product['price']:
+            price_attr = card.get('data-price') or card.get('data-product-price')
+            if price_attr:
+                product['price'] = self._normalize_price(price_attr)
+                product['price_display'] = f"${product['price']:.2f}" if product['price'] else None
+        
+        # Extract image
+        img_el = card.select_one('img')
+        if img_el:
+            src = img_el.get('src') or img_el.get('data-src') or img_el.get('data-lazy-src')
+            if src:
+                # Resolve relative URLs
+                if src.startswith('//'):
+                    src = 'https:' + src
+                elif src.startswith('/'):
+                    src = f"https://www.wegmans.com{src}"
+                
+                # Exclude logo images
+                if src and 'wegmans-og-share-img' not in src.lower() and '53100' not in src:
+                    product['image_url'] = src
+                
+                # Use alt text for name if name not found
+                if not product['name'] and img_el.get('alt'):
+                    product['name'] = img_el.get('alt')
+        
+        # Extract product URL/link - Wegmans product pages are at /shop/product/{id}-{name}
+        # These links are in the product cards and lead to actual product pages (not modals)
+        link_el = card.select_one('a[href*="/shop/product/"], a[href*="/product/"]')
+        if link_el:
+            href = link_el.get('href', '')
+            if href.startswith('/'):
+                product['product_url'] = f"https://www.wegmans.com{href}"
+            elif href.startswith('http'):
+                product['product_url'] = href
+        
+        # Also check if the card itself is a link
+        if not product['product_url'] and card.name == 'a':
+            href = card.get('href', '')
+            if '/shop/product/' in href or '/product/' in href:
+                if href.startswith('/'):
+                    product['product_url'] = f"https://www.wegmans.com{href}"
+                elif href.startswith('http'):
+                    product['product_url'] = href
+        
+        # Also try data attributes for product URL
+        if not product['product_url']:
+            url_attr = card.get('data-product-url') or card.get('data-href') or card.get('href') or card.get('data-url')
+            if url_attr:
+                if '/shop/product/' in str(url_attr) or '/product/' in str(url_attr):
+                    if str(url_attr).startswith('/'):
+                        product['product_url'] = f"https://www.wegmans.com{url_attr}"
+                    elif str(url_attr).startswith('http'):
+                        product['product_url'] = url_attr
+        
+        # Try to find product ID in data attributes and construct URL
+        if not product['product_url']:
+            product_id = card.get('data-product-id') or card.get('data-id') or card.get('id')
+            if product_id and product['name']:
+                # Construct URL from product ID and name
+                # Format: /shop/product/{id}-{name-slug}
+                name_slug = re.sub(r'[^a-z0-9]+', '-', product['name'].lower()).strip('-')
+                product['product_url'] = f"https://www.wegmans.com/shop/product/{product_id}-{name_slug}"
+        
+        # Extract brand and clean name
+        if product['name']:
+            brand, cleaned_name = self._extract_brand_from_name(product['name'])
+            product['brand'] = brand
+            if brand:
+                product['name'] = cleaned_name
+        
+        # Only return if we have at least name
+        if product['name']:
+            return product
+        
+        return None
+    
+    def _extract_from_json_ld(self, item: Dict[str, Any], store_id: str) -> Optional[Dict[str, Any]]:
+        """Extract product from JSON-LD structured data"""
+        product = {
+            'store_id': store_id,
+            'store_name': 'Wegmans',
+            'name': item.get('name'),
+            'price': None,
+            'price_display': None,
+            'image_url': None,
+            'product_url': item.get('url'),
+            'availability': 'Check Store'
+        }
+        
+        # Extract price
+        offers = item.get('offers', {})
+        if isinstance(offers, dict):
+            price = offers.get('price')
+            if price:
+                product['price'] = float(price) if isinstance(price, (int, float)) else self._normalize_price(str(price))
+                product['price_display'] = f"${product['price']:.2f}" if product['price'] else None
+        
+        # Extract image
+        image = item.get('image')
+        if image:
+            if isinstance(image, list) and len(image) > 0:
+                image = image[0]
+            if isinstance(image, dict):
+                image = image.get('url') or image.get('@id')
+            if isinstance(image, str) and 'wegmans-og-share-img' not in image.lower() and '53100' not in image:
+                product['image_url'] = image
+        
+        return product if product['name'] else None
+    
+    def _extract_from_dict(self, data: Dict[str, Any], store_id: str) -> Optional[Dict[str, Any]]:
+        """Extract product from dictionary data"""
+        product = {
+            'store_id': store_id,
+            'store_name': 'Wegmans',
+            'name': data.get('name') or data.get('title'),
+            'price': self._normalize_price(data.get('price')) if data.get('price') else None,
+            'price_display': data.get('price_display') or (f"${data.get('price'):.2f}" if data.get('price') else None),
+            'image_url': data.get('image') or data.get('image_url'),
+            'product_url': data.get('url') or data.get('product_url'),
+            'availability': 'Check Store'
+        }
+        
+        return product if product['name'] else None
+
+
 class SafewayExtractor(StoreProductExtractor):
     """Extractor for Safeway.com product cards"""
     
@@ -628,6 +864,7 @@ def get_extractor(store_id: str) -> StoreProductExtractor:
         'whole foods': WholeFoodsExtractor(),
         'safeway': SafewayExtractor(),
         'albertsons': SafewayExtractor(),  # Similar structure
+        'wegmans': WegmansExtractor(),
     }
     
     return extractors.get(store_id.lower(), StoreProductExtractor())

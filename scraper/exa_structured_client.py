@@ -172,10 +172,12 @@ class ExaStructuredClient:
         
         # Add location information if zipcode is provided
         if zipcode:
-            # For Wegmans, include store-specific URL pattern with zipcode
+            # For Wegmans, target both search pages (to extract product URLs) and product pages (for details)
+            # The WegmansExtractor will parse products from search result pages
+            # Then we fetch individual product pages for images and prices
             if store_name and store_name.lower() == "wegmans":
-                # Wegmans search URLs support store parameter: /shop/search?query=X&store=ZIPCODE
-                # This helps Exa find products available at that specific store location
+                # Wegmans search pages contain product cards with links to /shop/product/{id}-{name} pages
+                # We extract product URLs from search, then fetch product pages for images/prices
                 base_query = f"{base_query} site:wegmans.com/shop/search store {zipcode} site:wegmans.com/shop/product"
             
             # Get city/state from zipcode for better location context
@@ -621,8 +623,11 @@ class ExaStructuredClient:
 
             if not self._is_product_page(url, title):
                 logger.debug(f"Skipping non-product page: {title[:60]}... (URL: {url[:60]}...)")
-                # For Wegmans, be strict - only allow /shop/product/ URLs
-                if 'wegmans.com' in url.lower():
+                # For Wegmans, allow search pages since products are in modals
+                if 'wegmans.com' in url.lower() and '/shop/search' in url.lower():
+                    logger.debug(f"✅ Allowing Wegmans search page (products extracted from search results): {url[:60]}...")
+                    # Don't filter out - continue processing
+                elif 'wegmans.com' in url.lower():
                     logger.debug(f"Filtering out Wegmans non-product URL: {url[:60]}...")
                     return None
                 # For ALDI, be strict - only allow /product/ URLs (not /products/)
@@ -686,9 +691,14 @@ class ExaStructuredClient:
                         logger.debug(f"Cache lookup failed: {e}")
                 
                 # If cache miss, try Exa extraction (SLOW - API call)
-                if not product.get("image_url") and product.get("product_url"):
+                # For Wegmans, ALDI, and other stores that need better image extraction, always try Exa
+                product_url = product.get("product_url")
+                is_wegmans = product_url and "wegmans.com" in product_url.lower()
+                is_aldi = product_url and "aldi.us" in product_url.lower()
+                
+                if not product.get("image_url") and product_url:
                     try:
-                        extracted_image = await self.get_product_image_url(product["product_url"])
+                        extracted_image = await self.get_product_image_url(product_url)
                         if extracted_image:
                             product["image_url"] = extracted_image
                             # Cache it for future use
@@ -700,11 +710,11 @@ class ExaStructuredClient:
                                         brand=product.get("brand"),
                                         size=product.get("size") or product.get("quantity"),
                                         store=product.get("store_name"),
-                                        product_url=product.get("product_url")
+                                        product_url=product_url
                                     )
                                 except Exception as e:
                                     logger.debug(f"Failed to cache image: {e}")
-                            logger.debug(f"✅ Got image from Exa for '{product.get('name', 'Unknown')[:50]}'")
+                            logger.debug(f"✅ Got image from Exa for '{product.get('name', 'Unknown')[:50]}' ({'Wegmans' if is_wegmans else 'ALDI' if is_aldi else 'other'})")
                     except Exception as e:
                         logger.debug(f"Exa image extraction failed: {e}")
             
@@ -1563,6 +1573,56 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
                                         logger.debug(f"Failed to cache Walmart image: {e}")
                         except Exception as e:
                             logger.debug(f"Failed to extract Walmart image: {e}")
+                elif "wegmans.com" in url:
+                    # For Wegmans, try to extract image from text first (product pages often have image URLs)
+                    wegmans_img_patterns = [
+                        r'https?://[^\s"\'\)\]\}]*wegmans[^\s"\'\)\]\}]*\.(?:jpg|jpeg|png|webp|gif)(?:\?[^\s"\'\)\]\}]*)?',
+                        r'https?://[^\s"\'\)\]\}]*\.wegmans\.com[^\s"\'\)\]\}]*\.(?:jpg|jpeg|png|webp|gif)',
+                    ]
+                    for pattern in wegmans_img_patterns:
+                        wegmans_img_match = re.search(pattern, text, re.IGNORECASE)
+                        if wegmans_img_match:
+                            raw_url = wegmans_img_match.group(0)
+                            image_url = raw_url.rstrip('.,;!?)').split(')')[0].split(']')[0].split('}')[0].split('"')[0].split("'")[0]
+                            if image_url.startswith('http') and '.' in image_url:
+                                logger.debug(f"✅ Extracted Wegmans image from text: {image_url[:80]}...")
+                                # Cache it
+                                if _image_cache:
+                                    try:
+                                        await _image_cache.cache_image(
+                                            name=title,
+                                            image_url=image_url,
+                                            brand=brand,
+                                            size=quantity,
+                                            store=detected_store,
+                                            product_url=url
+                                        )
+                                    except Exception as e:
+                                        logger.debug(f"Failed to cache Wegmans image: {e}")
+                                break
+                            else:
+                                image_url = None
+                    # If still no image, try async extraction (Exa get_contents)
+                    if not image_url and extract_images_async:
+                        try:
+                            extracted_image = await self.get_product_image_url(url)
+                            if extracted_image:
+                                image_url = extracted_image
+                                # Cache it
+                                if _image_cache:
+                                    try:
+                                        await _image_cache.cache_image(
+                                            name=title,
+                                            image_url=image_url,
+                                            brand=brand,
+                                            size=quantity,
+                                            store=detected_store,
+                                            product_url=url
+                                        )
+                                    except Exception as e:
+                                        logger.debug(f"Failed to cache Wegmans image: {e}")
+                        except Exception as e:
+                            logger.debug(f"Failed to extract Wegmans image: {e}")
 
             # Clean and extract meaningful description
             # Prefer Exa summary (AI-generated, much better quality)

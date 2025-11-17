@@ -85,6 +85,8 @@ class HTMLImageExtractor:
                 image_url = await self._extract_kroger_image(html, product_url)
             elif store == "whole_foods":
                 image_url = await self._extract_whole_foods_image(html, product_url)
+            elif store == "wegmans":
+                image_url = await self._extract_wegmans_image(html, product_url)
             else:
                 # Universal parser for other stores
                 image_url = await self._extract_universal_image(html, product_url)
@@ -151,6 +153,8 @@ class HTMLImageExtractor:
             return "kroger"
         elif "wholefoodsmarket.com" in url_lower or "wholefoods.com" in url_lower:
             return "whole_foods"
+        elif "wegmans.com" in url_lower:
+            return "wegmans"
         else:
             return "unknown"
     
@@ -452,6 +456,119 @@ class HTMLImageExtractor:
             
         except Exception as e:
             logger.debug(f"Universal image extraction failed: {e}")
+            return None
+    
+    async def _extract_wegmans_image(self, html: str, url: str) -> Optional[str]:
+        """Extract image from Wegmans product page"""
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            # Method 1: JSON-LD structured data
+            json_ld_scripts = soup.find_all('script', type='application/ld+json')
+            for script in json_ld_scripts:
+                try:
+                    data = json.loads(script.string)
+                    if isinstance(data, dict):
+                        image = data.get('image')
+                        if image:
+                            if isinstance(image, list) and len(image) > 0:
+                                image = image[0]
+                            if isinstance(image, dict):
+                                image = image.get('url') or image.get('@id')
+                            if image and isinstance(image, str) and image.startswith('http'):
+                                # Exclude Wegmans logo/share images
+                                if 'wegmans-og-share-img' not in image.lower() and '53100' not in image:
+                                    return image
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    continue
+            
+            # Method 2: og:image meta tag (but exclude logo)
+            og_image = soup.find('meta', property='og:image')
+            if og_image and og_image.get('content'):
+                image_url = og_image['content']
+                # Exclude Wegmans logo/share images
+                if image_url.startswith('http') and 'wegmans-og-share-img' not in image_url.lower() and '53100' not in image_url:
+                    return image_url
+            
+            # Method 3: Find Wegmans product image patterns in HTML
+            # Wegmans uses images.wegmans.com CDN
+            wegmans_img_patterns = [
+                r'https?://images\.wegmans\.com/is/image/wegmans[^"\s<>]+\.(?:jpg|jpeg|png|webp|gif)(?:\?[^"\s<>]+)?',
+                r'https?://images\.wegmans\.com/[^"\s<>]+\.(?:jpg|jpeg|png|webp|gif)',
+            ]
+            
+            for pattern in wegmans_img_patterns:
+                matches = re.findall(pattern, html, re.IGNORECASE)
+                for match in matches:
+                    # Exclude logo/share images
+                    if 'wegmans-og-share-img' not in match.lower() and '53100' not in match:
+                        # Prefer product-specific images (usually have product IDs in path)
+                        if '/product/' in match.lower() or any(char.isdigit() for char in match if len(match) > 50):
+                            return match
+                # If no product-specific images found, use first non-logo image
+                for match in matches:
+                    if 'wegmans-og-share-img' not in match.lower() and '53100' not in match:
+                        return match
+            
+            # Method 4: Extract product ID from URL and construct image URL
+            # Wegmans URLs: /shop/product/{id}-{name}
+            product_id_match = re.search(r'/shop/product/(\d+)-', url)
+            if product_id_match:
+                product_id = product_id_match.group(1)
+                # Try Wegmans CDN patterns
+                formats = [
+                    f"https://images.wegmans.com/is/image/wegmans/{product_id}?wid=800&hei=800&qlt=80",
+                    f"https://images.wegmans.com/is/image/wegmans/{product_id}",
+                ]
+                # Return first format (will validate later)
+                return formats[0]
+            
+            # Method 5: Find img tags with product-related classes/ids
+            product_image_selectors = [
+                'img[class*="product"]',
+                'img[id*="product"]',
+                'img[data-test*="product"]',
+                'img[class*="main"]',
+                'img[class*="primary"]',
+                'img[class*="hero"]',
+                'img[alt*="product"]',
+            ]
+            
+            for selector in product_image_selectors:
+                imgs = soup.select(selector)
+                for img in imgs[:5]:  # Check first 5 matches
+                    src = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
+                    if src:
+                        # Resolve relative URLs
+                        if src.startswith('//'):
+                            src = 'https:' + src
+                        elif src.startswith('/'):
+                            src = urljoin(url, src)
+                        
+                        # Exclude logo/share images
+                        if src.startswith('http') and 'wegmans-og-share-img' not in src.lower() and '53100' not in src:
+                            if self._looks_like_product_image(src):
+                                return src
+            
+            # Method 6: Find all img tags and filter for product images (excluding logos)
+            all_imgs = soup.find_all('img')
+            for img in all_imgs:
+                src = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
+                if src:
+                    # Exclude logo/share images
+                    if 'wegmans-og-share-img' not in src.lower() and '53100' not in src:
+                        if self._looks_like_product_image(src):
+                            if src.startswith('//'):
+                                src = 'https:' + src
+                            elif src.startswith('/'):
+                                src = urljoin(url, src)
+                            if src.startswith('http'):
+                                return src
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Wegmans image extraction failed: {e}")
             return None
     
     def _looks_like_product_image(self, url: str) -> bool:

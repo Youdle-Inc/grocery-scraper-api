@@ -167,6 +167,33 @@ class AIScraper:
                 except:
                     continue
             
+            # Find image URLs (for AI to extract product images)
+            image_urls = []
+            # Check og:image meta tag
+            og_image = soup.find('meta', property='og:image')
+            if og_image and og_image.get('content'):
+                img_url = og_image['content']
+                if img_url.startswith(('http://', 'https://')):
+                    image_urls.append(img_url)
+            
+            # Find img tags with product-related classes
+            img_tags = soup.find_all('img')
+            for img in img_tags[:20]:  # Limit to first 20
+                src = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
+                if src:
+                    # Resolve relative URLs
+                    if src.startswith('//'):
+                        src = 'https:' + src
+                    elif src.startswith('/'):
+                        from urllib.parse import urljoin
+                        src = urljoin(url, src)
+                    
+                    if src.startswith(('http://', 'https://')):
+                        # Exclude logos and icons
+                        src_lower = src.lower()
+                        if not any(exclude in src_lower for exclude in ['logo', 'icon', 'favicon', 'sprite', 'wegmans-og-share-img', '53100']):
+                            image_urls.append(src)
+            
             # Get HTML snippet for context
             html_snippet = str(main)[:10000] if main else ""
             
@@ -175,7 +202,8 @@ class AIScraper:
                 "html_snippet": html_snippet[:10000],
                 "title": title_text,
                 "url": url,
-                "price_candidates": list(set(price_candidates))[:10]  # Deduplicate
+                "price_candidates": list(set(price_candidates))[:10],  # Deduplicate
+                "image_urls": list(set(image_urls))[:15]  # Deduplicate and limit
             }
             
         except Exception as e:
@@ -238,6 +266,9 @@ Page Title: {page_content.get("title", "")}
 Page Text (first 4000 chars):
 {page_content.get("text", "")[:4000]}
 
+Image URLs Found in HTML (may contain product images):
+{chr(10).join(page_content.get("image_urls", [])[:10]) if page_content.get("image_urls") else "None found - look for img tags with product images"}
+
 Price Candidates Found (may contain the actual price):
 {price_candidates if price_candidates else "None found - search the page text carefully"}
 
@@ -253,6 +284,7 @@ Extract the following information and return ONLY valid JSON (no markdown, no co
     "brand": "<brand name or null>",
     "quantity": "<size/quantity like '1 gallon', '12ct', '16 oz' or null>",
     "description": "<detailed product description - include key features, nutritional benefits, ingredients highlights, and what makes this product special. Write 2-3 sentences that would be useful for shoppers. If no detailed description available, use null>",
+    "image_url": "<direct URL to the main product image - extract from img tags, og:image, or JSON-LD. Exclude logos, icons, and store branding images. Must be a full HTTP/HTTPS URL>",
     "availability": "<in stock/out of stock/available for pickup/available for delivery/check store or null>",
     "rating": <number 1-5 or null>,
     "reviews_count": <number or null>,
@@ -357,6 +389,7 @@ Critical Instructions:
                 "brand": data.get("brand"),
                 "quantity": data.get("quantity"),
                 "description": data.get("description"),
+                "image_url": self._validate_image_url(data.get("image_url")),
                 "availability": data.get("availability"),
                 "rating": self._parse_float(data.get("rating")),
                 "reviews_count": self._parse_int(data.get("reviews_count")),
