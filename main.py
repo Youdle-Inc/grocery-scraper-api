@@ -809,6 +809,18 @@ async def aggregate_products(
         default_stores = ["walmart", "aldi", "kroger"]
         requested_store_ids = user_store_ids[:10] if user_store_ids else default_stores
         
+        # If searching in Chicago area, map Kroger to Mariano's
+        from scraper.partner_api_client import is_chicago_area_zipcode
+        if is_chicago_area_zipcode(zipcode):
+            # Replace kroger with marianos in requested stores (whether from user input or defaults)
+            if "kroger" in requested_store_ids:
+                requested_store_ids = [s if s != "kroger" else "marianos" for s in requested_store_ids]
+                logger.info(f"📍 Chicago area zipcode ({zipcode}) detected, mapping Kroger to Mariano's in aggregate search")
+            # If using defaults and marianos not already in list, add it
+            elif not user_store_ids and "marianos" not in requested_store_ids:
+                requested_store_ids.append("marianos")
+                logger.info(f"📍 Chicago area zipcode ({zipcode}) detected, adding Mariano's to default stores")
+        
         # Filter stores by location availability
         if location_service:
             # Filter requested stores to only include those available in zipcode
@@ -1549,7 +1561,12 @@ async def aggregate_products(
                     
                     # Determine availability
                     availability = offer.get("availability", "CHECK_STORE")
-                    if availability and "stock" in availability.lower():
+                    
+                    # Handle standardized availability formats (from partner APIs)
+                    if availability in ["IN_STOCK", "OUT_OF_STOCK", "LOW_STOCK", "CHECK_STORE"]:
+                        # Already in correct format, use as-is
+                        pass
+                    elif availability and "stock" in availability.lower():
                         if "out" in availability.lower():
                             availability = "OUT_OF_STOCK"
                         elif "low" in availability.lower():
@@ -1558,6 +1575,12 @@ async def aggregate_products(
                             availability = "IN_STOCK"
                     elif availability and availability.lower() == "in stock":
                         availability = "IN_STOCK"
+                    elif store_id in ["kroger", "marianos"]:
+                        # Kroger/Mariano's API provides accurate store-specific availability
+                        # If we have availability from API, trust it (already handled above)
+                        # Otherwise fall back to CHECK_STORE
+                        if availability not in ["IN_STOCK", "OUT_OF_STOCK"]:
+                            availability = "CHECK_STORE"
                     elif store_id == "wegmans":
                         # For Wegmans: If product has price and is store-filtered, assume IN_STOCK
                         # Wegmans shows products filtered by zipcode/store, so if it appears, it's available
@@ -1606,7 +1629,13 @@ async def aggregate_products(
                     store_zipcode = store_location.get("zipcode") or offer.get("zipcode") or zipcode
                     
                     # Get full store name from location if available
-                    full_store_name = store_location.get("store_name") or store_name
+                    # Avoid duplication: if store_location name contains the store_name, prefer store_name
+                    location_store_name = store_location.get("store_name") or ""
+                    if location_store_name and store_name and store_name.lower() in location_store_name.lower():
+                        # Location name already contains store name (e.g., "Mariano's Mariano's"), use just store_name
+                        full_store_name = store_name
+                    else:
+                        full_store_name = location_store_name or store_name
                     
                     # Create store info
                     store_info = StoreInfoDetailed(

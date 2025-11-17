@@ -176,10 +176,21 @@ class KrogerAPIClient:
                         upc = item.get("upc", item.get("productId", ""))
                         description = item.get("description", "")
                         
-                        # Get price from items array if available, otherwise None
+                        # Get price and availability from items array if available
                         price = None
+                        availability = "CHECK_STORE"
                         if "items" in item and item["items"]:
-                            price = item["items"][0].get("price", {}).get("regular", None)
+                            first_item = item["items"][0]
+                            price = first_item.get("price", {}).get("regular", None)
+                            
+                            # Extract availability from fulfillment.inStore
+                            fulfillment = first_item.get("fulfillment", {})
+                            in_store = fulfillment.get("inStore")
+                            if in_store is True:
+                                availability = "IN_STOCK"
+                            elif in_store is False:
+                                availability = "OUT_OF_STOCK"
+                            # If inStore is None or not present, keep CHECK_STORE
                         
                         # Get image URL
                         image_url = None
@@ -195,7 +206,7 @@ class KrogerAPIClient:
                             "currency": "USD",
                             "quantity": None,  # Extract from description if possible
                             "size": None,
-                            "availability": "Check Store",  # Kroger API doesn't provide stock status
+                            "availability": availability,
                             "product_url": self._build_product_link(description, upc),
                             "image_url": image_url,
                             "store_id": "kroger",

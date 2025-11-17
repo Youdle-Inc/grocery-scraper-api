@@ -129,7 +129,7 @@ class PartnerAPIClient:
                         limit_per_store=limit // 3  # Distribute across stores
                     )
                     
-                    # If Mariano's, update store_name in products
+                    # If Mariano's, update store_name and product URLs in products
                     if is_marianos:
                         for product in products:
                             # Update store_name to Mariano's
@@ -138,6 +138,10 @@ class PartnerAPIClient:
                             # Also update any chain references
                             if "chain" in product and product["chain"] == "Kroger":
                                 product["chain"] = "Mariano's"
+                            # Convert Kroger URLs to Mariano's URLs
+                            product_url = product.get("product_url", "")
+                            if product_url and "kroger.com" in product_url:
+                                product["product_url"] = product_url.replace("kroger.com", "marianos.com")
                 else:
                     # Without zipcode, we can't use Kroger API (requires store_id)
                     logger.warning("Kroger/Mariano's API requires zipcode for store lookup")
