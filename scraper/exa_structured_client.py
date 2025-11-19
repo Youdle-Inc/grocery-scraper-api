@@ -180,6 +180,13 @@ class ExaStructuredClient:
                 # We extract product URLs from search, then fetch product pages for images/prices
                 base_query = f"{base_query} site:wegmans.com/shop/search store {zipcode} site:wegmans.com/shop/product"
             
+            # For Costco, explicitly include zipcode in search to ensure location-based results
+            # Costco filters products by warehouse/delivery location based on zipcode
+            if store_name and store_name.lower() == "costco":
+                # Costco search URLs can include zipcode parameter: /s?keyword={query}&zipcode={zipcode}
+                # This ensures products shown are available for that location
+                base_query = f"{base_query} site:costco.com/s?keyword= zipcode {zipcode} warehouse {zipcode}"
+            
             # Get city/state from zipcode for better location context
             city, state = self._get_city_state_from_zipcode(zipcode)
             if city and state:
@@ -1231,6 +1238,17 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
                 if updated_url != url:
                     logger.debug(f"🔄 Added Wegmans store context ({zipcode}) to product URL for price extraction")
                     url = updated_url
+            
+            # Costco needs zipcode in search URLs to show location-specific products and availability
+            # Costco filters products by warehouse/delivery location based on zipcode
+            if zipcode and url and 'costco.com' in url.lower():
+                # Add zipcode parameter to Costco search URLs
+                # Format: /s?keyword={query}&zipcode={zipcode}
+                if '/s?' in url.lower() or '/s?keyword=' in url.lower():
+                    updated_url = self._add_or_replace_query_param(url, "zipcode", zipcode)
+                    if updated_url != url:
+                        logger.debug(f"🔄 Added Costco zipcode ({zipcode}) to search URL for location-based results")
+                        url = updated_url
             
             # Wegmans-specific: Extract product name from URL if title is generic
             if url and 'wegmans.com/shop/product/' in url.lower():
