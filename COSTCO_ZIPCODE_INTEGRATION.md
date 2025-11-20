@@ -115,3 +115,4 @@ To verify zipcode integration works:
 3. **Availability Checking**: Verify product availability at specific warehouse locations
 4. **Price Variation**: Handle price differences between warehouses
 
+

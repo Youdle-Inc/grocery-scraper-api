@@ -200,3 +200,4 @@ div.MuiTypography-t7:contains("(")
 4. Test with various product types
 5. Add to extractor factory function
 
+
