@@ -1414,6 +1414,11 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
                             logger.debug(f"✅ Got price from Exa structured extraction{' for ' + detected_store_name if detected_store_name else ''}: ${price}")
                 except Exception as e:
                     logger.debug(f"Failed to get price from Exa: {e}")
+            
+            # For Wegmans: If price extraction failed due to JavaScript limitations, set "check store"
+            if is_wegmans and not price:
+                price = "check store"
+                logger.debug(f"⚠️ Wegmans price extraction failed (likely JavaScript limitation) - setting to 'check store'")
 
             # Extract brand from title or text
             brand = None

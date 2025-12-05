@@ -1106,8 +1106,14 @@ class WegmansExtractor(StoreProductExtractor):
             if brand:
                 product['name'] = cleaned_name
         
-        # Only return if we have at least name and price
-        if product['name'] and product['price']:
+        # For Wegmans: If price extraction failed due to JavaScript limitations, set "check store"
+        if not product['price']:
+            product['price'] = "check store"
+            product['price_display'] = "check store"
+            logger.debug(f"⚠️ Wegmans price extraction failed (likely JavaScript limitation) - setting to 'check store'")
+        
+        # Only return if we have at least name
+        if product['name']:
             return product
         
         return None
@@ -1133,6 +1139,12 @@ class WegmansExtractor(StoreProductExtractor):
                 product['price'] = float(price) if isinstance(price, (int, float)) else self._normalize_price(str(price))
                 product['price_display'] = f"${product['price']:.2f}" if product['price'] else None
         
+        # For Wegmans: If price extraction failed due to JavaScript limitations, set "check store"
+        if not product['price']:
+            product['price'] = "check store"
+            product['price_display'] = "check store"
+            logger.debug(f"⚠️ Wegmans price extraction failed (likely JavaScript limitation) - setting to 'check store'")
+        
         # Extract image
         image = item.get('image')
         if image:
@@ -1157,6 +1169,12 @@ class WegmansExtractor(StoreProductExtractor):
             'product_url': data.get('url') or data.get('product_url'),
             'availability': 'Check Store'
         }
+        
+        # For Wegmans: If price extraction failed due to JavaScript limitations, set "check store"
+        if not product['price']:
+            product['price'] = "check store"
+            product['price_display'] = "check store"
+            logger.debug(f"⚠️ Wegmans price extraction failed (likely JavaScript limitation) - setting to 'check store'")
         
         return product if product['name'] else None
 
