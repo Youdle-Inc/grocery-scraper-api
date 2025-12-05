@@ -608,90 +608,245 @@ class WegmansExtractor(StoreProductExtractor):
     """Extractor for Wegmans.com product cards from search results"""
     
     def extract_products(self, html: str, store_id: str = "wegmans") -> List[Dict[str, Any]]:
-        """Extract products from Wegmans search results HTML"""
+        """Extract products from Wegmans search results HTML
+        
+        Wegmans HTML structure (as of Dec 2024):
+        - Products are in a <ul> (list) element
+        - Each product is in a <li> (listitem) element
+        - Product info is in buttons with aria-labels containing "Price is:"
+        - Product name in <h3>, price in "Price is:" text, size before price
+        """
         products = []
         
         try:
             soup = BeautifulSoup(html, 'html.parser')
             
-            # Wegmans search results might be in JSON-LD structured data
-            json_ld_scripts = soup.find_all('script', type='application/ld+json')
-            for script in json_ld_scripts:
-                try:
-                    import json
-                    data = json.loads(script.string)
-                    # Check if it's a product list
-                    if isinstance(data, dict) and data.get('@type') == 'ItemList':
-                        items = data.get('itemListElement', [])
-                        for item in items:
-                            if isinstance(item, dict) and item.get('@type') == 'Product':
-                                product = self._extract_from_json_ld(item, store_id)
-                                if product and self._is_valid_individual_product(product):
-                                    products.append(product)
-                                elif product:
-                                    logger.debug(f"Filtered out invalid Wegmans product: {product.get('name', 'Unknown')[:50]}...")
-                except (json.JSONDecodeError, KeyError, TypeError):
-                    continue
+            # Primary method: Find product list items
+            # Wegmans uses <ul> with <li> elements for product cards
+            # Each product card has a button with aria-label containing "Price is:"
+            product_lists = soup.select('ul')
             
-            # Also try to find product cards in HTML
-            # Wegmans might use various selectors - try common patterns
-            product_selectors = [
-                '[class*="product"]',
-                '[data-testid*="product"]',
-                '[class*="ProductCard"]',
-                '[class*="product-card"]',
-                '[class*="productTile"]',
-                '[class*="product-tile"]',
-            ]
-            
-            for selector in product_selectors:
-                cards = soup.select(selector)
-                if cards:
-                    logger.debug(f"Found {len(cards)} Wegmans product cards with selector: {selector}")
-                    for card in cards[:20]:  # Limit to first 20
-                        try:
-                            product = self._extract_product(card, store_id)
-                            if product and self._is_valid_individual_product(product):
-                                products.append(product)
-                            elif product:
-                                logger.debug(f"Filtered out invalid Wegmans product: {product.get('name', 'Unknown')[:50]}...")
-                        except Exception as e:
-                            logger.debug(f"Failed to extract Wegmans product: {e}")
-                            continue
-                    if products:
-                        break  # If we found products, stop trying other selectors
-            
-            # Also try to extract from script tags that might contain product data
-            script_tags = soup.find_all('script')
-            for script in script_tags:
-                script_text = script.string or ''
-                # Look for product data in JavaScript variables
-                if 'product' in script_text.lower() and ('image' in script_text.lower() or 'price' in script_text.lower()):
+            for product_list in product_lists:
+                # Find all list items that contain product buttons
+                list_items = product_list.select('li')
+                
+                for item in list_items:
+                    # Check if this list item contains a product (has "Price is:" in text)
+                    item_text = item.get_text()
+                    if 'Price is:' not in item_text:
+                        continue
+                    
                     try:
-                        # Try to extract JSON-like structures
-                        json_matches = re.findall(r'\{[^{}]*"name"[^{}]*"price"[^{}]*\}', script_text, re.IGNORECASE)
-                        for match in json_matches[:5]:  # Limit matches
-                            try:
-                                import json
-                                product_data = json.loads(match)
-                                if product_data.get('name') or product_data.get('price'):
-                                    product = self._extract_from_dict(product_data, store_id)
+                        product = self._extract_product(item, store_id)
+                        if product and self._is_valid_individual_product(product):
+                            products.append(product)
+                            logger.debug(f"Extracted Wegmans product: {product.get('name', 'Unknown')[:50]}")
+                        elif product:
+                            logger.debug(f"Filtered out invalid Wegmans product: {product.get('name', 'Unknown')[:50]}...")
+                    except Exception as e:
+                        logger.debug(f"Failed to extract Wegmans product from list item: {e}")
+                        continue
+                
+                # If we found products in this list, stop looking
+                if products:
+                    logger.debug(f"Found {len(products)} Wegmans products from list items")
+                    break
+            
+            # Fallback: Try JSON-LD structured data (may still be present)
+            if not products:
+                json_ld_scripts = soup.find_all('script', type='application/ld+json')
+                for script in json_ld_scripts:
+                    try:
+                        import json
+                        data = json.loads(script.string)
+                        # Check if it's a product list
+                        if isinstance(data, dict) and data.get('@type') == 'ItemList':
+                            items = data.get('itemListElement', [])
+                            for item in items:
+                                if isinstance(item, dict) and item.get('@type') == 'Product':
+                                    product = self._extract_from_json_ld(item, store_id)
                                     if product and self._is_valid_individual_product(product):
                                         products.append(product)
                                     elif product:
                                         logger.debug(f"Filtered out invalid Wegmans product: {product.get('name', 'Unknown')[:50]}...")
-                            except:
-                                continue
-                    except Exception:
+                    except (json.JSONDecodeError, KeyError, TypeError):
                         continue
             
+            # Fallback: Try generic product selectors (for older page versions)
+            if not products:
+                product_selectors = [
+                    '[class*="product"]',
+                    '[data-testid*="product"]',
+                    '[class*="ProductCard"]',
+                    '[class*="product-card"]',
+                ]
+                
+                for selector in product_selectors:
+                    cards = soup.select(selector)
+                    if cards:
+                        logger.debug(f"Trying fallback selector: {selector}, found {len(cards)} elements")
+                        for card in cards[:20]:  # Limit to first 20
+                            # Skip if no "Price is:" in text (not a product card)
+                            if 'Price is:' not in card.get_text():
+                                continue
+                            try:
+                                product = self._extract_product(card, store_id)
+                                if product and self._is_valid_individual_product(product):
+                                    products.append(product)
+                            except Exception as e:
+                                logger.debug(f"Failed to extract Wegmans product: {e}")
+                                continue
+                        if products:
+                            break  # If we found products, stop trying other selectors
+            
+            # Fallback: Try to extract from script tags that might contain product data
+            if not products:
+                script_tags = soup.find_all('script')
+                for script in script_tags:
+                    script_text = script.string or ''
+                    # Look for product data in JavaScript variables
+                    if 'product' in script_text.lower() and ('image' in script_text.lower() or 'price' in script_text.lower()):
+                        try:
+                            # Try to extract JSON-like structures
+                            json_matches = re.findall(r'\{[^{}]*"name"[^{}]*"price"[^{}]*\}', script_text, re.IGNORECASE)
+                            for match in json_matches[:5]:  # Limit matches
+                                try:
+                                    import json
+                                    product_data = json.loads(match)
+                                    if product_data.get('name') or product_data.get('price'):
+                                        product = self._extract_from_dict(product_data, store_id)
+                                        if product and self._is_valid_individual_product(product):
+                                            products.append(product)
+                                except:
+                                    continue
+                        except Exception:
+                            continue
+            
+            # Final fallback: Try to extract from plain text (Exa returns text content, not HTML)
+            # This handles cases where the content is rendered as plain text
+            if not products:
+                text_products = self._extract_products_from_text(html, store_id)
+                if text_products:
+                    products.extend(text_products)
+                    logger.debug(f"Extracted {len(text_products)} Wegmans products from plain text")
+            
+            logger.info(f"Extracted {len(products)} products from Wegmans content")
+            
         except Exception as e:
-            logger.error(f"Failed to parse Wegmans HTML: {e}")
+            logger.error(f"Failed to parse Wegmans content: {e}")
         
         return products
     
-    def _extract_product(self, card, store_id: str) -> Optional[Dict[str, Any]]:
-        """Extract a single product from Wegmans product card"""
+    def _extract_products_from_text(self, text: str, store_id: str) -> List[Dict[str, Any]]:
+        """Extract products from plain text content (Exa returns text, not HTML)
+        
+        Wegmans text structure from Exa:
+        - Product blocks separated by product names
+        - Each block contains: name, size, "Price is: $X.XX/ea", "Unit price is: ($X.XX/unit)"
+        - Rating info: "X.X out of 5 stars. N reviews"
+        - Availability: "May not be available", "See Store Associate"
+        """
+        products = []
+        
+        # Check if this looks like Wegmans product text
+        if 'Price is:' not in text and 'price is:' not in text.lower():
+            return products
+        
+        # Primary approach: Use regex to find product patterns directly
+        # Pattern: Product name followed by size followed by price
+        # Example: "Wegmans Just Tea Cinnamon Chai Herbal Tea Bags\n20 ct.\nPrice is: $2.99/ea"
+        # Allow newlines between components
+        product_pattern = re.compile(
+            r'([A-Z][^\n$]{5,100}?)\s*\n\s*'  # Product name (starts with capital, 5-100 chars, ends at newline)
+            r'(\d+(?:\.\d+)?\s*(?:oz|fl\.?\s*oz|ct|ounce|gallon|gal|lb|pack|pk|count)\.?)\s*\n\s*'  # Size on next line
+            r'Price is:\s*\$?([\d,]+\.?\d*)/ea'  # Price
+            r'(?:\s*\n?\s*Unit price is:\s*\(([^)]+)\))?',  # Unit price (optional)
+            re.IGNORECASE | re.MULTILINE
+        )
+        
+        for match in product_pattern.finditer(text):
+            try:
+                name = match.group(1).strip()
+                size = match.group(2).strip()
+                price_str = match.group(3).replace(',', '')
+                unit_price = match.group(4).strip() if match.group(4) else None
+                
+                # Check if name starts with availability indicator (like "May not be available")
+                availability = 'In Stock'
+                if name.lower().startswith('may not be available'):
+                    availability = 'Limited Availability'
+                    # Remove the availability prefix from name
+                    name = re.sub(r'^may not be available\s*', '', name, flags=re.IGNORECASE).strip()
+                elif name.lower().startswith('see store associate'):
+                    availability = 'Check Store'
+                    name = re.sub(r'^see store associate\s*', '', name, flags=re.IGNORECASE).strip()
+                
+                price = self._normalize_price(price_str)
+                
+                if name and price:
+                    # Generate a product URL that won't be filtered as a category page
+                    # Use /shop/product/ format with a slug based on product name
+                    name_slug = re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
+                    product = {
+                        'store_id': store_id,
+                        'store_name': 'Wegmans',
+                        'name': name,
+                        'price': price,
+                        'price_display': f"${price_str}/ea",
+                        'price_per_unit': unit_price,
+                        'size': size,
+                        'image_url': None,
+                        'product_url': f"https://www.wegmans.com/shop/product/{name_slug}",
+                        'availability': availability,
+                        'rating': None,
+                        'review_count': None
+                    }
+                    
+                    # Also check surrounding text for availability indicators (if not already set)
+                    if availability == 'In Stock':
+                        # Only look at text AFTER this product's match up to next product
+                        block_end = min(len(text), match.end() + 150)
+                        # Find the next product (next "Price is:" occurrence after this one)
+                        next_price = text.find('Price is:', match.end())
+                        if next_price > 0:
+                            block_end = min(block_end, next_price)
+                        surrounding_text = text[match.end():block_end]
+                        
+                        if 'See Store Associate' in surrounding_text:
+                            product['availability'] = 'Check Store'
+                    
+                    # Extract rating if present (look after the price until next product)
+                    block_end = min(len(text), match.end() + 150)
+                    next_price = text.find('Price is:', match.end())
+                    if next_price > 0:
+                        block_end = min(block_end, next_price)
+                    rating_text = text[match.end():block_end]
+                    
+                    rating_match_inner = re.search(r'(\d+\.?\d*)\s*out of 5 stars\.?\s*(?:(\d+)\s*reviews?)?', rating_text, re.IGNORECASE)
+                    if rating_match_inner:
+                        try:
+                            product['rating'] = float(rating_match_inner.group(1))
+                            if rating_match_inner.group(2):
+                                product['review_count'] = int(rating_match_inner.group(2))
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    # Extract brand
+                    brand, cleaned_name = self._extract_brand_from_name(product['name'])
+                    product['brand'] = brand
+                    if brand:
+                        product['name'] = cleaned_name
+                    
+                    if self._is_valid_individual_product(product):
+                        products.append(product)
+            except Exception as e:
+                logger.debug(f"Failed to extract product from pattern match: {e}")
+                continue
+        
+        return products
+    
+    def _extract_product_from_text_block(self, block: str, store_id: str) -> Optional[Dict[str, Any]]:
+        """Extract a single product from a text block"""
         product = {
             'store_id': store_id,
             'store_name': 'Wegmans',
@@ -699,55 +854,227 @@ class WegmansExtractor(StoreProductExtractor):
             'price': None,
             'price_display': None,
             'price_per_unit': None,
+            'size': None,
             'image_url': None,
             'product_url': None,
-            'availability': 'Check Store'
+            'availability': 'In Stock',
+            'rating': None,
+            'review_count': None
         }
         
-        # Extract product name
-        name_el = card.select_one('h3, h2, h4, [class*="title"], [class*="name"], [class*="product-name"]')
+        # Extract price from "Price is: $X.XX/ea"
+        price_match = re.search(r'Price is:\s*\$?([\d,]+\.?\d*)/ea', block, re.IGNORECASE)
+        if price_match:
+            price_str = price_match.group(1).replace(',', '')
+            product['price'] = self._normalize_price(price_str)
+            product['price_display'] = f"${price_str}/ea"
+        
+        # Extract unit price from "Unit price is: ($X.XX/unit)"
+        unit_price_match = re.search(r'Unit price is:\s*\(([^)]+)\)', block, re.IGNORECASE)
+        if unit_price_match:
+            product['price_per_unit'] = unit_price_match.group(1).strip()
+        
+        # Extract size (e.g., "20 ct.", "32 fl. oz.", "8.72 ounce")
+        size_match = re.search(r'(\d+(?:\.\d+)?\s*(?:oz|fl\.?\s*oz|ct|ounce|gallon|gal|lb|pack|pk|count)\.?)', block, re.IGNORECASE)
+        if size_match:
+            product['size'] = size_match.group(1).strip()
+        
+        # Extract product name - text before the size or price, starting with capital letter
+        # Try to find name by looking at text before price
+        lines = block.split('\n')
+        for line in lines:
+            line = line.strip()
+            # Skip empty lines, lines with just numbers, price lines, etc.
+            if not line or line.startswith('$') or 'Price is:' in line or 'Unit price is:' in line:
+                continue
+            if re.match(r'^[\d\s.,]+$', line):  # Skip number-only lines
+                continue
+            if 'out of 5 stars' in line.lower():  # Skip rating lines
+                continue
+            if len(line) > 10 and line[0].isupper():
+                # This could be a product name
+                # Clean it up - remove size info if present at end
+                name = re.sub(r'\s+\d+(?:\.\d+)?\s*(?:oz|fl\.?\s*oz|ct|ounce|gallon|gal|lb|pack|pk|count)\.?\s*$', '', line, flags=re.IGNORECASE)
+                if len(name) > 5:
+                    product['name'] = name.strip()
+                    break
+        
+        # Extract availability
+        if 'May not be available' in block:
+            product['availability'] = 'Limited Availability'
+        elif 'See Store Associate' in block:
+            product['availability'] = 'Check Store'
+        
+        # Extract rating and reviews
+        rating_match = re.search(r'(\d+\.?\d*)\s*out of 5 stars\.?\s*(?:(\d+)\s*reviews?)?', block, re.IGNORECASE)
+        if rating_match:
+            try:
+                product['rating'] = float(rating_match.group(1))
+                if rating_match.group(2):
+                    product['review_count'] = int(rating_match.group(2))
+            except (ValueError, TypeError):
+                pass
+        
+        # Generate product URL
+        if product['name']:
+            name_slug = re.sub(r'[^a-z0-9]+', '-', product['name'].lower()).strip('-')
+            product['product_url'] = f"https://www.wegmans.com/shop/product/{name_slug}"
+        
+        # Extract brand
+        if product['name']:
+            brand, cleaned_name = self._extract_brand_from_name(product['name'])
+            product['brand'] = brand
+            if brand:
+                product['name'] = cleaned_name
+        
+        # Return only if we have name and price
+        if product['name'] and product['price']:
+            return product
+        
+        return None
+    
+    def _extract_product(self, card, store_id: str) -> Optional[Dict[str, Any]]:
+        """Extract a single product from Wegmans product card
+        
+        Wegmans HTML structure (as of Dec 2024):
+        - Product cards are in <li> (listitem) elements
+        - Product name is in <h3> heading within <figure>
+        - Size/quantity is in a generic element (e.g., "20 ct.")
+        - Price is in text with "Price is:" label (e.g., "$2.99/ea")
+        - Unit price is in text with "Unit price is:" label (e.g., "($0.15/ct.)")
+        - Image is in <figure> element
+        - Availability indicators: "May not be available", "See Store Associate"
+        - Rating/reviews: "X.X out of 5 stars. N reviews"
+        """
+        product = {
+            'store_id': store_id,
+            'store_name': 'Wegmans',
+            'name': None,
+            'price': None,
+            'price_display': None,
+            'price_per_unit': None,
+            'size': None,
+            'image_url': None,
+            'product_url': None,
+            'availability': 'In Stock',
+            'rating': None,
+            'review_count': None
+        }
+        
+        # Get the full card text for parsing
+        card_text = card.get_text()
+        
+        # Check if this is a product card by looking for "Price is:" in the text
+        if 'Price is:' not in card_text:
+            return None
+        
+        # Extract product name from h3 heading
+        name_el = card.select_one('h3')
         if name_el:
             product['name'] = name_el.get_text(strip=True)
         
-        # Also try data attributes
+        # Fallback: Try to extract name from button aria-label
+        # Format: "[Product Name] [Size] Price is: $X.XX/ea..."
         if not product['name']:
-            product['name'] = card.get('data-product-name') or card.get('aria-label')
+            button_el = card.select_one('button[aria-label*="Price is:"]')
+            if button_el:
+                aria_label = button_el.get('aria-label', '')
+                # Extract product name (everything before the size/price)
+                name_match = re.match(r'^(.+?)\s+\d+(?:\.\d+)?\s*(?:oz|fl\.?\s*oz|ct|ounce|gallon|gal|lb|pack|pk)\.?\s+Price is:', aria_label, re.IGNORECASE)
+                if name_match:
+                    product['name'] = name_match.group(1).strip()
+                else:
+                    # Try simpler extraction - everything before "Price is:"
+                    simple_match = re.match(r'^(.+?)\s+Price is:', aria_label)
+                    if simple_match:
+                        product['name'] = simple_match.group(1).strip()
         
-        # Extract price
-        price_el = card.select_one('[class*="price"], [class*="Price"], [data-testid*="price"]')
-        if price_el:
-            price_text = price_el.get_text(strip=True)
-            product['price_display'] = price_text
-            product['price'] = self._normalize_price(price_text)
+        # Extract size/quantity (e.g., "20 ct.", "32 fl. oz.", "8.72 ounce")
+        size_match = re.search(r'(\d+(?:\.\d+)?\s*(?:oz|fl\.?\s*oz|ct|ounce|gallon|gal|lb|pack|pk|count)\.?)', card_text, re.IGNORECASE)
+        if size_match:
+            product['size'] = size_match.group(1).strip()
         
-        # Also try data attributes for price
-        if not product['price']:
-            price_attr = card.get('data-price') or card.get('data-product-price')
-            if price_attr:
-                product['price'] = self._normalize_price(price_attr)
-                product['price_display'] = f"${product['price']:.2f}" if product['price'] else None
+        # Extract price from "Price is:" text (format: "Price is:$X.XX/ea")
+        price_match = re.search(r'Price is:\s*\$?([\d,]+\.?\d*)/ea', card_text)
+        if price_match:
+            price_str = price_match.group(1).replace(',', '')
+            product['price'] = self._normalize_price(price_str)
+            product['price_display'] = f"${price_str}/ea"
         
-        # Extract image
-        img_el = card.select_one('img')
-        if img_el:
-            src = img_el.get('src') or img_el.get('data-src') or img_el.get('data-lazy-src')
-            if src:
-                # Resolve relative URLs
-                if src.startswith('//'):
-                    src = 'https:' + src
-                elif src.startswith('/'):
-                    src = f"https://www.wegmans.com{src}"
-                
-                # Exclude logo images
-                if src and 'wegmans-og-share-img' not in src.lower() and '53100' not in src:
-                    product['image_url'] = src
+        # Extract unit price from "Unit price is:" text (format: "Unit price is:($X.XX/ct.)")
+        unit_price_match = re.search(r'Unit price is:\s*\(([^)]+)\)', card_text)
+        if unit_price_match:
+            product['price_per_unit'] = unit_price_match.group(1).strip()
+        
+        # Extract image from figure element
+        figure_el = card.select_one('figure')
+        if figure_el:
+            img_el = figure_el.select_one('img')
+            if img_el:
+                src = img_el.get('src') or img_el.get('data-src') or img_el.get('data-lazy-src')
+                if src:
+                    # Resolve relative URLs
+                    if src.startswith('//'):
+                        src = 'https:' + src
+                    elif src.startswith('/'):
+                        src = f"https://www.wegmans.com{src}"
+                    
+                    # Exclude logo images
+                    if src and 'wegmans-og-share-img' not in src.lower() and '53100' not in src:
+                        product['image_url'] = src
                 
                 # Use alt text for name if name not found
                 if not product['name'] and img_el.get('alt'):
                     product['name'] = img_el.get('alt')
         
+        # Fallback: try any img in the card
+        if not product['image_url']:
+            img_el = card.select_one('img')
+            if img_el:
+                src = img_el.get('src') or img_el.get('data-src') or img_el.get('data-lazy-src')
+                if src:
+                    if src.startswith('//'):
+                        src = 'https:' + src
+                    elif src.startswith('/'):
+                        src = f"https://www.wegmans.com{src}"
+                    if src and 'wegmans-og-share-img' not in src.lower() and '53100' not in src:
+                        product['image_url'] = src
+        
+        # Extract availability status
+        if 'May not be available' in card_text:
+            product['availability'] = 'Limited Availability'
+        elif 'See Store Associate' in card_text:
+            product['availability'] = 'Check Store'
+        elif 'Out of stock' in card_text.lower() or 'out of stock' in card_text.lower():
+            product['availability'] = 'Out of Stock'
+        else:
+            product['availability'] = 'In Stock'
+        
+        # Extract rating and reviews (format: "X.X out of 5 stars. N reviews" or "X.X out of 5 stars.")
+        rating_match = re.search(r'(\d+\.?\d*)\s*out of 5 stars\.?\s*(?:(\d+)\s*reviews?)?', card_text, re.IGNORECASE)
+        if rating_match:
+            try:
+                product['rating'] = float(rating_match.group(1))
+            except (ValueError, TypeError):
+                pass
+            if rating_match.group(2):
+                try:
+                    product['review_count'] = int(rating_match.group(2))
+                except (ValueError, TypeError):
+                    pass
+        
+        # Try alternative rating format: "(N)" after star rating
+        if not product['review_count']:
+            review_count_match = re.search(r'"(\d+\.?\d*)"\s*\((\d+)\)', card_text)
+            if review_count_match:
+                try:
+                    if not product['rating']:
+                        product['rating'] = float(review_count_match.group(1))
+                    product['review_count'] = int(review_count_match.group(2))
+                except (ValueError, TypeError):
+                    pass
+        
         # Extract product URL/link - Wegmans product pages are at /shop/product/{id}-{name}
-        # These links are in the product cards and lead to actual product pages (not modals)
         link_el = card.select_one('a[href*="/shop/product/"], a[href*="/product/"]')
         if link_el:
             href = link_el.get('href', '')
@@ -765,24 +1092,12 @@ class WegmansExtractor(StoreProductExtractor):
                 elif href.startswith('http'):
                     product['product_url'] = href
         
-        # Also try data attributes for product URL
-        if not product['product_url']:
-            url_attr = card.get('data-product-url') or card.get('data-href') or card.get('href') or card.get('data-url')
-            if url_attr:
-                if '/shop/product/' in str(url_attr) or '/product/' in str(url_attr):
-                    if str(url_attr).startswith('/'):
-                        product['product_url'] = f"https://www.wegmans.com{url_attr}"
-                    elif str(url_attr).startswith('http'):
-                        product['product_url'] = url_attr
-        
-        # Try to find product ID in data attributes and construct URL
-        if not product['product_url']:
-            product_id = card.get('data-product-id') or card.get('data-id') or card.get('id')
-            if product_id and product['name']:
-                # Construct URL from product ID and name
-                # Format: /shop/product/{id}-{name-slug}
-                name_slug = re.sub(r'[^a-z0-9]+', '-', product['name'].lower()).strip('-')
-                product['product_url'] = f"https://www.wegmans.com/shop/product/{product_id}-{name_slug}"
+        # Try to construct URL from product name if not found
+        if not product['product_url'] and product['name']:
+            # Construct URL from product name
+            # Format: /shop/product/{name-slug}
+            name_slug = re.sub(r'[^a-z0-9]+', '-', product['name'].lower()).strip('-')
+            product['product_url'] = f"https://www.wegmans.com/shop/product/{name_slug}"
         
         # Extract brand and clean name
         if product['name']:
@@ -791,8 +1106,8 @@ class WegmansExtractor(StoreProductExtractor):
             if brand:
                 product['name'] = cleaned_name
         
-        # Only return if we have at least name
-        if product['name']:
+        # Only return if we have at least name and price
+        if product['name'] and product['price']:
             return product
         
         return None

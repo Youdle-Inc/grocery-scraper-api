@@ -26,3 +26,6 @@ anthropic>=0.18.0  # Optional - for Claude-based extraction
 
 # Partner API Clients (Optional - for official grocery store APIs)
 pycryptodome>=3.19.0  # For Walmart API RSA signatures
+
+# Fast JavaScript Scraping (for JS-rendered sites like Costco, Target, Walmart)
+playwright>=1.40.0  # Headless browser automation - run: playwright install chromium

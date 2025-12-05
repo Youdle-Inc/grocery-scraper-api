@@ -1,0 +1,17 @@
+# Wegmans Product Search Test Commands
+# Make sure server is running: python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+# 1. Health check
+curl "http://localhost:8000/health"
+
+# 2. Wegmans search for "chai tea" (Rochester, NY - Wegmans HQ area)
+curl "http://localhost:8000/products/search?query=chai%20tea&store_name=Wegmans&zipcode=14618&num_results=5"
+
+# 3. Wegmans search for "milk"
+curl "http://localhost:8000/products/search?query=milk&store_name=Wegmans&zipcode=14618&num_results=3"
+
+# 4. Wegmans aggregate search
+curl "http://localhost:8000/products/aggregate?query=chai%20tea&zipcode=14618&stores=wegmans&limit=5"
+
+# 5. Wegmans search with refresh (bypass cache)
+curl "http://localhost:8000/products/search?query=chai%20tea&store_name=Wegmans&zipcode=14618&num_results=5&refresh=true"
