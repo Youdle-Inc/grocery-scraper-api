@@ -1531,28 +1531,10 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
             # Fallback image extraction for specific stores (only if still no image)
             # Cache any extracted images for future use
             if not image_url and url:
-                if "wegmans.com" in url:
-                    # Wegmans product ID extraction from URL: /shop/product/{id}-{name}
-                    wegmans_id_match = re.search(r'/shop/product/(\d+)', url)
-                    if wegmans_id_match:
-                        product_id = wegmans_id_match.group(1)
-                        # Wegmans image CDN pattern (common format)
-                        image_url = f"https://www.wegmans.com/wp-content/uploads/product/{product_id}.jpg"
-                        logger.debug(f"✅ Derived Wegmans image URL from product ID: {image_url}")
-                        # Cache it
-                        if _image_cache:
-                            try:
-                                await _image_cache.cache_image(
-                                    name=title,
-                                    image_url=image_url,
-                                    brand=brand,
-                                    size=quantity,
-                                    store=detected_store,
-                                    product_url=url
-                                )
-                            except Exception as e:
-                                logger.debug(f"Failed to cache Wegmans image: {e}")
-                elif "target.com" in url:
+                # Note: Wegmans images require actual page scraping (HTML/AI extraction)
+                # They're not available via simple URL patterns
+                # Use /products/aggregate endpoint for Wegmans images
+                if "target.com" in url:
                     # Try to find GUEST ID pattern in text (Target images often have GUEST IDs in HTML)
                     guest_match = re.search(r'GUEST_[a-f0-9\-]+', text, re.IGNORECASE)
                     if guest_match:
