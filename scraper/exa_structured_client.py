@@ -27,6 +27,9 @@ except ImportError:
 # Import store-specific extractors
 from scraper.store_extractors import get_extractor
 
+# Import geocoding service for zip code to city/state conversion
+from scraper.geocoding_service import get_geocoding_service
+
 load_dotenv()
 # Initialize exa client lazily to avoid errors if API key is missing
 exa = None
@@ -172,30 +175,47 @@ class ExaStructuredClient:
         
         # Add location information if zipcode is provided
         if zipcode:
-            # For Wegmans, target both search pages (to extract product URLs) and product pages (for details)
-            # The WegmansExtractor will parse products from search result pages
-            # Then we fetch individual product pages for images and prices
+            # Get city/state from zipcode FIRST for better location context
+            # This is needed before building store-specific queries
+            city, state = self._get_city_state_from_zipcode(zipcode)
+            
+            # For Wegmans, use single site: restriction with proper location context
+            # Wegmans has stores in: NY, PA, NJ, VA, MD, MA, NC, CT, DC, DE
             if store_name and store_name.lower() == "wegmans":
-                # Wegmans search pages contain product cards with links to /shop/product/{id}-{name} pages
-                # We extract product URLs from search, then fetch product pages for images/prices
-                base_query = f"{base_query} site:wegmans.com/shop/search store {zipcode} site:wegmans.com/shop/product"
+                # Use single site: restriction (not double site:) for wegmans.com
+                # Include location context to find stores/products in the zipcode area
+                if city and state:
+                    # Use city/state for better location matching
+                    base_query = f"{base_query} site:wegmans.com near {city} {state} zipcode {zipcode}"
+                else:
+                    # Fallback: try to get state from zipcode prefix for Wegmans coverage areas
+                    geocoding_service = get_geocoding_service()
+                    state_abbr = geocoding_service.get_state_from_zipcode(zipcode)
+                    if state_abbr:
+                        state_name = geocoding_service.STATE_NAMES.get(state_abbr, state_abbr)
+                        base_query = f"{base_query} site:wegmans.com near {state_name} {state_abbr} zipcode {zipcode}"
+                    else:
+                        # Last resort: just use zipcode
+                        base_query = f"{base_query} site:wegmans.com zipcode {zipcode}"
             
             # For Costco, explicitly include zipcode in search to ensure location-based results
             # Costco filters products by warehouse/delivery location based on zipcode
-            if store_name and store_name.lower() == "costco":
-                # Costco search URLs can include zipcode parameter: /s?keyword={query}&zipcode={zipcode}
-                # This ensures products shown are available for that location
-                base_query = f"{base_query} site:costco.com/s?keyword= zipcode {zipcode} warehouse {zipcode}"
+            elif store_name and store_name.lower() == "costco":
+                # Costco search URLs can include zipcode parameter
+                if city and state:
+                    base_query = f"{base_query} site:costco.com near {city} {state} zipcode {zipcode}"
+                else:
+                    base_query = f"{base_query} site:costco.com zipcode {zipcode}"
             
-            # Get city/state from zipcode for better location context
-            city, state = self._get_city_state_from_zipcode(zipcode)
-            if city and state:
-                # Use city, state, and zipcode for best location filtering
-                base_query = f"{base_query} near {city} {state} zipcode {zipcode}"
+            # For other stores, add general location context
             else:
-                # For unknown zipcodes, use explicit zipcode location filtering
-                # Exa understands zipcodes well, so this should still work effectively
-                base_query = f"{base_query} location zipcode {zipcode} in {zipcode}"
+                if city and state:
+                    # Use city, state, and zipcode for best location filtering
+                    base_query = f"{base_query} near {city} {state} zipcode {zipcode}"
+                else:
+                    # For unknown zipcodes, use explicit zipcode location filtering
+                    # Exa understands zipcodes well, so this should still work effectively
+                    base_query = f"{base_query} location zipcode {zipcode} in {zipcode}"
         
         # Explicitly exclude gift cards and non-food items
         # Exa supports exclusion with minus sign
@@ -1951,45 +1971,46 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
             return None
     
     def _get_city_state_from_zipcode(self, zipcode: str) -> tuple:
-        """Get city and state from zipcode (basic lookup for common ZIPs)"""
-        # Basic ZIP code to city/state mapping for common areas
-        zip_mapping = {
-            "60601": ("Chicago", "IL"), "60602": ("Chicago", "IL"), "60603": ("Chicago", "IL"),
-            "60604": ("Chicago", "IL"), "60605": ("Chicago", "IL"), "60606": ("Chicago", "IL"),
-            "60607": ("Chicago", "IL"), "60608": ("Chicago", "IL"), "60609": ("Chicago", "IL"),
-            "60610": ("Chicago", "IL"), "60611": ("Chicago", "IL"), "60612": ("Chicago", "IL"),
-            "60613": ("Chicago", "IL"), "60614": ("Chicago", "IL"), "60615": ("Chicago", "IL"),
-            "60616": ("Chicago", "IL"), "60617": ("Chicago", "IL"), "60618": ("Chicago", "IL"),
-            "60619": ("Chicago", "IL"), "60620": ("Chicago", "IL"), "60621": ("Chicago", "IL"),
-            "60622": ("Chicago", "IL"), "60623": ("Chicago", "IL"), "60624": ("Chicago", "IL"),
-            "60625": ("Chicago", "IL"), "60626": ("Chicago", "IL"), "60628": ("Chicago", "IL"),
-            "60629": ("Chicago", "IL"), "60630": ("Chicago", "IL"), "60631": ("Chicago", "IL"),
-            "60632": ("Chicago", "IL"), "60633": ("Chicago", "IL"), "60634": ("Chicago", "IL"),
-            "60636": ("Chicago", "IL"), "60637": ("Chicago", "IL"), "60638": ("Chicago", "IL"),
-            "60639": ("Chicago", "IL"), "60640": ("Chicago", "IL"), "60641": ("Chicago", "IL"),
-            "60642": ("Chicago", "IL"), "60643": ("Chicago", "IL"), "60644": ("Chicago", "IL"),
-            "60645": ("Chicago", "IL"), "60646": ("Chicago", "IL"), "60647": ("Chicago", "IL"),
-            "60649": ("Chicago", "IL"), "60651": ("Chicago", "IL"), "60652": ("Chicago", "IL"),
-            "60653": ("Chicago", "IL"), "60654": ("Chicago", "IL"), "60655": ("Chicago", "IL"),
-            "60656": ("Chicago", "IL"), "60657": ("Chicago", "IL"), "60659": ("Chicago", "IL"),
-            "60660": ("Chicago", "IL"), "60661": ("Chicago", "IL"),
-            "10001": ("New York", "NY"), "10002": ("New York", "NY"), "10003": ("New York", "NY"),
-            "10004": ("New York", "NY"), "10005": ("New York", "NY"),
-            "38125": ("Memphis", "TN"), "38103": ("Memphis", "TN"), "38104": ("Memphis", "TN"),
-            "38105": ("Memphis", "TN"), "38106": ("Memphis", "TN"), "38107": ("Memphis", "TN"),
-            "38108": ("Memphis", "TN"), "38109": ("Memphis", "TN"), "38111": ("Memphis", "TN"),
-            "38112": ("Memphis", "TN"), "38113": ("Memphis", "TN"), "38114": ("Memphis", "TN"),
-            "38115": ("Memphis", "TN"), "38116": ("Memphis", "TN"), "38117": ("Memphis", "TN"),
-            "38118": ("Memphis", "TN"), "38119": ("Memphis", "TN"), "38120": ("Memphis", "TN"),
-            "38122": ("Memphis", "TN"), "38126": ("Memphis", "TN"), "38127": ("Memphis", "TN"),
-            "38128": ("Memphis", "TN"), "38130": ("Memphis", "TN"), "38131": ("Memphis", "TN"),
-            "38132": ("Memphis", "TN"), "38133": ("Memphis", "TN"), "38134": ("Memphis", "TN"),
-            "38135": ("Memphis", "TN"), "38138": ("Memphis", "TN"), "38139": ("Memphis", "TN"),
-            "90001": ("Los Angeles", "CA"), "90002": ("Los Angeles", "CA"),
-            "94102": ("San Francisco", "CA"), "94103": ("San Francisco", "CA"),
-            "02108": ("Boston", "MA"), "02109": ("Boston", "MA"),
-        }
-        return zip_mapping.get(zipcode, (None, None))
+        """
+        Get city and state from zipcode using Google Geocoding API with static fallback.
+        
+        Uses the GeocodingService which:
+        1. First checks an in-memory cache
+        2. Tries Google Geocoding API if API key is available
+        3. Falls back to static zip code mapping
+        4. Falls back to state-from-prefix mapping
+        
+        Args:
+            zipcode: 5-digit US zip code
+            
+        Returns:
+            Tuple of (city, state) or (None, None) if not found
+        """
+        try:
+            geocoding_service = get_geocoding_service()
+            # Use synchronous version to avoid blocking (static lookup only)
+            # For async API calls, use async method in search functions
+            return geocoding_service.get_city_state_sync(zipcode)
+        except Exception as e:
+            logger.warning(f"Failed to get city/state for {zipcode}: {e}")
+            return None, None
+    
+    async def _get_city_state_from_zipcode_async(self, zipcode: str) -> tuple:
+        """
+        Async version of _get_city_state_from_zipcode that can use Google Geocoding API.
+        
+        Args:
+            zipcode: 5-digit US zip code
+            
+        Returns:
+            Tuple of (city, state) or (None, None) if not found
+        """
+        try:
+            geocoding_service = get_geocoding_service()
+            return await geocoding_service.get_city_state_from_zipcode(zipcode)
+        except Exception as e:
+            logger.warning(f"Failed to get city/state for {zipcode}: {e}")
+            return None, None
 
     async def search_stores_in_zipcode(self, store_chain: str, zipcode: str) -> List[Dict[str, Any]]:
         """

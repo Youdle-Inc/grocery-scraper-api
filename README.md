@@ -77,6 +77,11 @@ Create a `.env` file in the project root:
 ```bash
 # Required: Exa API Key (for real product URLs and images)
 EXA_API_KEY=your_exa_api_key_here
+
+# Optional: Google API Key (for better zip code geocoding and store verification)
+# Enables dynamic zip code to city/state conversion and Google Places API store verification
+# Requires Geocoding API and Places API enabled in Google Cloud Console
+GOOGLE_GEOCODING_API_KEY=your_google_api_key_here
 ```
 
 ### 3. Run the API
@@ -267,7 +272,14 @@ curl "http://localhost:8000/products/aggregate?query=milk&zipcode=38125&stores=t
 
 | Variable | Description | Required | Example |
 |----------|-------------|----------|---------|
-| `EXA_API_KEY` | Exa API key | ✅ | `exa-abc123...` |
+| `EXA_API_KEY` | Exa API key for product search | ✅ | `exa-abc123...` |
+| `GOOGLE_GEOCODING_API_KEY` | Google API key for zip code geocoding and Places API | ❌ (optional) | `AIza...` |
+
+**Note on Google API Key:**
+- The Google API key enables dynamic zip code to city/state conversion and store location verification via Google Places API
+- Without it, the system uses static zip code mappings (still works well for most common zip codes)
+- The key needs Geocoding API and Places API enabled
+- You can also use `GOOGLE_MAPS_API_KEY` or `GOOGLE_PLACES_API_KEY` as alternative variable names
 
 ### API Response Fields
 
