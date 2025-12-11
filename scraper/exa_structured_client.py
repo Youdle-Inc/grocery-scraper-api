@@ -394,9 +394,13 @@ class ExaStructuredClient:
             # Search with text content extraction - reduced for speed
             # Note: Exa's search_and_contents doesn't support summary parameter
             # Use get_contents with summary for individual URLs if needed
+            # Increase results for Wegmans to get more products
+            is_wegmans_search = store_name and store_name.lower() == "wegmans"
+            wegmans_multiplier = 3 if is_wegmans_search else 2
+            wegmans_max = 50 if is_wegmans_search else 30
             search_options = {
                 "query": search_query,
-                "num_results": min(num_results * 2, 30),  # Reduced from 3x to 2x, max 30 instead of 50
+                "num_results": min(num_results * wegmans_multiplier, wegmans_max),
                 "type": "neural",  # Neural search for semantic matching
                 "text": {"max_characters": 1500}  # Reduced from 3000 to 1500 for faster processing
                 # Note: extras/image_links is only available in get_contents, not search_and_contents
@@ -528,10 +532,11 @@ class ExaStructuredClient:
                 logger.debug(f"Filtering out gift card: {title[:60]}... (URL: {url[:60]}...)")
                 return False
 
-        # Wegmans-specific filtering - only include actual product pages
+        # Wegmans-specific filtering - allow product pages and search pages
         if 'wegmans.com' in url_lower:
             # Wegmans product pages are at /shop/product/{id}-{name}
-            if '/shop/product/' in url_lower:
+            # Also allow search pages at /shop/search/ for more results
+            if '/shop/product/' in url_lower or '/shop/search' in url_lower:
                 # Exclude store location pages, sitemaps, FAQs, etc.
                 exclude_wegmans = [
                     '/stores/',
@@ -1272,9 +1277,9 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
             
             # Wegmans-specific: Extract product name from URL if title is generic
             if url and 'wegmans.com/shop/product/' in url.lower():
-                # URL format: /shop/product/{id}-{name}
-                # Extract name from URL if title is generic
-                url_match = re.search(r'/shop/product/\d+-(.+)', url)
+                # URL format: /shop/product/{id}-{name}?store={zipcode}
+                # Extract name from URL if title is generic, excluding query parameters
+                url_match = re.search(r'/shop/product/\d+-([^?]+)', url)
                 if url_match:
                     url_product_name = url_match.group(1).replace('-', ' ').title()
                     # If title is generic (like "Wegmans", "Product Information", etc.), use URL name
@@ -1526,7 +1531,28 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
             # Fallback image extraction for specific stores (only if still no image)
             # Cache any extracted images for future use
             if not image_url and url:
-                if "target.com" in url:
+                if "wegmans.com" in url:
+                    # Wegmans product ID extraction from URL: /shop/product/{id}-{name}
+                    wegmans_id_match = re.search(r'/shop/product/(\d+)', url)
+                    if wegmans_id_match:
+                        product_id = wegmans_id_match.group(1)
+                        # Wegmans image CDN pattern (common format)
+                        image_url = f"https://www.wegmans.com/wp-content/uploads/product/{product_id}.jpg"
+                        logger.debug(f"✅ Derived Wegmans image URL from product ID: {image_url}")
+                        # Cache it
+                        if _image_cache:
+                            try:
+                                await _image_cache.cache_image(
+                                    name=title,
+                                    image_url=image_url,
+                                    brand=brand,
+                                    size=quantity,
+                                    store=detected_store,
+                                    product_url=url
+                                )
+                            except Exception as e:
+                                logger.debug(f"Failed to cache Wegmans image: {e}")
+                elif "target.com" in url:
                     # Try to find GUEST ID pattern in text (Target images often have GUEST IDs in HTML)
                     guest_match = re.search(r'GUEST_[a-f0-9\-]+', text, re.IGNORECASE)
                     if guest_match:
