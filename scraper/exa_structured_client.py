@@ -1752,6 +1752,11 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
                 "source": "exa_structured"
             }
             
+            # Convert $0 prices to "check store" (invalid price)
+            if price is not None and isinstance(price, (int, float)) and price == 0:
+                product["price"] = "check store"
+                logger.debug(f"⚠️ Converted $0 price to 'check store' for {title[:50]}")
+            
             # Try to extract price per unit and variants from text if available
             if text:
                 # Extract price per unit (e.g., "$0.02/fl oz", "$/lb")
