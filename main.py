@@ -1832,19 +1832,57 @@ async def aggregate_products(
             except Exception as e:
                 logger.warning(f"AI scraper enrichment failed: {e}")
 
-        # Fetch store locations for all retailers
+        # Fetch store locations for all retailers (use partner APIs for real coordinates)
         logger.info(f"🔍 Fetching store locations for {len(considered_store_ids)} retailers")
         store_locations_cache = {}
         
         async def fetch_store_locations(store_id: str):
-            """Fetch store locations for a retailer"""
+            """Fetch store locations for a retailer - prefer partner APIs for real coordinates"""
             try:
+                # Try partner APIs first - they have actual store coordinates
+                if partner_api_client:
+                    if store_id.lower() == "kroger" and partner_api_client.kroger_client:
+                        stores = await partner_api_client.kroger_client.get_stores(zipcode, radius=10, limit=1)
+                        if stores:
+                            store = stores[0]
+                            store_locations_cache[store_id] = {
+                                "store_id": store.get("store_id"),
+                                "retailer_store_id": store.get("retailer_store_id"),
+                                "store_name": store.get("name", "Kroger"),
+                                "address": store.get("address"),
+                                "city": store.get("city"),
+                                "state": store.get("state"),
+                                "zipcode": store.get("zipcode"),
+                                "latitude": store.get("latitude"),
+                                "longitude": store.get("longitude"),
+                            }
+                            logger.info(f"✅ Kroger store: {store.get('name')} at {store.get('latitude')}, {store.get('longitude')}")
+                            return
+                    
+                    if store_id.lower() == "target" and partner_api_client.target_client:
+                        stores = await partner_api_client.target_client.get_stores(zipcode, radius=10, limit=1)
+                        if stores:
+                            store = stores[0]
+                            store_locations_cache[store_id] = {
+                                "store_id": store.get("store_id"),
+                                "retailer_store_id": store.get("retailer_store_id"),
+                                "store_name": store.get("name", "Target"),
+                                "address": store.get("address"),
+                                "city": store.get("city"),
+                                "state": store.get("state"),
+                                "zipcode": store.get("zipcode"),
+                                "latitude": store.get("latitude"),
+                                "longitude": store.get("longitude"),
+                            }
+                            logger.info(f"✅ Target store: {store.get('name')} at {store.get('latitude')}, {store.get('longitude')}")
+                            return
+                
+                # Fall back to Exa search
                 store_name = to_store_name(store_id)
                 stores = await exa_client.search_stores_in_zipcode(store_name, zipcode)
                 if stores:
-                    # Use the first store found (closest match)
                     store_locations_cache[store_id] = stores[0]
-                    logger.debug(f"✅ Found store location for {store_name}: {stores[0].get('store_name', 'Unknown')}")
+                    logger.debug(f"✅ Found store location via Exa for {store_name}")
                 else:
                     logger.debug(f"⚠️ No store location found for {store_name} near {zipcode}")
             except Exception as e:
@@ -1853,7 +1891,7 @@ async def aggregate_products(
         # Fetch store locations concurrently
         await asyncio.gather(*[fetch_store_locations(sid) for sid in considered_store_ids], return_exceptions=True)
         
-        # Get coordinates for the zipcode to use for store locations
+        # Get coordinates for the zipcode as fallback for stores without coordinates
         geocoding_service = get_geocoding_service()
         geo_city, geo_state, geo_lat, geo_lng = await geocoding_service.get_location_from_zipcode(zipcode)
         logger.info(f"📍 Geocoded {zipcode}: city={geo_city}, state={geo_state}, lat={geo_lat}, lng={geo_lng}")
@@ -2006,6 +2044,14 @@ async def aggregate_products(
                     else:
                         full_store_name = location_store_name or store_name
                     
+                    # Get coordinates - prefer store location coords, fall back to zipcode
+                    store_lat = store_location.get("latitude") if store_location else None
+                    store_lng = store_location.get("longitude") if store_location else None
+                    # Fall back to zipcode coordinates if store doesn't have coords
+                    if store_lat is None or store_lng is None:
+                        store_lat = zipcode_lat
+                        store_lng = zipcode_lng
+                    
                     # Create store info with coordinates
                     store_info = StoreInfoDetailed(
                         retailer=store_id,
@@ -2015,8 +2061,8 @@ async def aggregate_products(
                         city=store_city,
                         state=store_state,
                         zipcode=store_zipcode,
-                        latitude=zipcode_lat,
-                        longitude=zipcode_lng
+                        latitude=store_lat,
+                        longitude=store_lng
                     )
                     
                     enhanced_offer_dict = {
