@@ -241,6 +241,8 @@ class StoreInfoDetailed(BaseModel):
     city: Optional[str] = None
     state: Optional[str] = None
     zipcode: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
 class OfferEnhanced(BaseModel):
     store: StoreInfoDetailed

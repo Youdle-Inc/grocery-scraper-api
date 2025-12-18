@@ -6,7 +6,7 @@ A professional FastAPI service for scraping grocery store product data
 
 from fastapi import FastAPI, HTTPException, Query, Path
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from typing import List, Optional, Dict, Any
 import asyncio
 import os
@@ -50,6 +50,7 @@ from scraper.image_scraper import ImageScraper
 from scraper.ai_scraper import AIScraper
 from scraper.html_image_extractor import HTMLImageExtractor
 from scraper.web_search_service import WebSearchService
+from scraper.geocoding_service import get_geocoding_service
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -695,6 +696,363 @@ async def verify_price(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get(
+    "/products/search/stream",
+    tags=["🛒 Products"],
+    summary="Search Products (Streaming)",
+    description="""
+    Search for products with streaming results - products are returned as they're found!
+    
+    Returns products in real-time using Server-Sent Events (SSE) format.
+    Each product is sent as a JSON event as soon as it's found, instead of waiting for all results.
+    
+    **Parameters:**
+    - `query` (required): Product search term
+    - `stores` (optional): Comma-separated store names (e.g., "Target,Walmart,ALDI")
+    - `zipcode` (optional): 5-digit ZIP code
+    - `num_results` (optional): Number of results per store (default: 5)
+    
+    **Example:**
+    ```
+    GET /products/search/stream?query=oat+milk&stores=Target,Walmart&zipcode=38125
+    ```
+    
+    **Response Format (Server-Sent Events):**
+    ```
+    data: {"type": "product", "store": "Walmart", "product": {...}}
+    
+    data: {"type": "product", "store": "Target", "product": {...}}
+    
+    data: {"type": "complete", "total_products": 10}
+    ```
+    
+    **Benefits:**
+    - See results immediately as they're found
+    - No waiting for slow stores
+    - Better user experience with progressive loading
+    """,
+)
+async def search_products_stream(
+    query: str = Query(..., description="Product search query", example="oat milk"),
+    stores: Optional[str] = Query(None, description="Comma-separated store names", example="Target,Walmart"),
+    zipcode: Optional[str] = Query(None, description="5-digit ZIP code", example="38125"),
+    num_results: int = Query(5, ge=1, le=20, description="Results per store")
+):
+    """Stream product search results in real-time"""
+    
+    async def generate_products():
+        """Generator function that yields products as they're found"""
+        try:
+            # Determine which stores to search
+            if stores:
+                store_list = [s.strip() for s in stores.split(",")]
+            else:
+                # Default stores
+                store_list = ["Walmart", "Target", "ALDI"]
+            
+            total_products = 0
+            
+            # Send initial metadata
+            yield f"data: {json.dumps({'type': 'start', 'query': query, 'stores': store_list, 'zipcode': zipcode})}\n\n"
+            
+            # Use a queue to collect products from all stores as they arrive
+            product_queue = asyncio.Queue()
+            semaphore = asyncio.Semaphore(5)  # Limit concurrent store searches
+            active_tasks = len(store_list)
+            
+            async def search_store(store_name: str):
+                """Search a single store and put products in queue"""
+                async with semaphore:
+                    try:
+                        # Map store name to store_id
+                        store_id = store_name.lower().replace(" ", "_").replace("-", "_")
+                        
+                        # Try partner API first
+                        products = []
+                        if partner_api_client and partner_api_client.has_partner_api(store_id):
+                            logger.info(f"🎯 Streaming from {store_name} partner API")
+                            products = await partner_api_client.search_products(
+                                store_id=store_id,
+                                query=query,
+                                zipcode=zipcode,
+                                limit=num_results
+                            )
+                        else:
+                            # Use Exa
+                            if exa_client and exa_client.is_available():
+                                logger.info(f"🔍 Streaming from Exa for {store_name}")
+                                products = await exa_client.search_products_structured(
+                                    query=query,
+                                    store_name=store_name,
+                                    zipcode=zipcode,
+                                    num_results=num_results,
+                                    include_location=False
+                                )
+                        
+                        # Put each product in the queue
+                        for product in products:
+                            await product_queue.put(("product", store_name, product))
+                        
+                        # Send store completion
+                        await product_queue.put(("store_complete", store_name, len(products)))
+                        
+                    except Exception as e:
+                        logger.error(f"Error streaming from {store_name}: {e}")
+                        await product_queue.put(("error", store_name, str(e)))
+            
+            # Start all store searches concurrently
+            tasks = [asyncio.create_task(search_store(store)) for store in store_list]
+            
+            # Create a task to mark completion when all searches are done
+            async def mark_complete():
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await product_queue.put(("complete", None, None))
+            
+            completion_task = asyncio.create_task(mark_complete())
+            
+            # Yield products as they arrive in the queue
+            while True:
+                event_type, store, data = await product_queue.get()
+                
+                if event_type == "product":
+                    total_products += 1
+                    event_data = {
+                        "type": "product",
+                        "store": store,
+                        "product": data
+                    }
+                    yield f"data: {json.dumps(event_data)}\n\n"
+                
+                elif event_type == "store_complete":
+                    yield f"data: {json.dumps({'type': 'store_complete', 'store': store, 'count': data})}\n\n"
+                
+                elif event_type == "error":
+                    yield f"data: {json.dumps({'type': 'error', 'store': store, 'error': data})}\n\n"
+                
+                elif event_type == "complete":
+                    # All stores finished
+                    yield f"data: {json.dumps({'type': 'complete', 'total_products': total_products})}\n\n"
+                    break
+            
+        except Exception as e:
+            logger.error(f"Streaming error: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+    
+    return StreamingResponse(
+        generate_products(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # Disable nginx buffering
+        }
+    )
+
+@app.get(
+    "/products/aggregate/stream",
+    tags=["📊 Aggregate"],
+    summary="Compare Products (Streaming)",
+    description="""
+    Compare products across multiple stores with streaming results - offers are returned as they're found!
+    
+    Returns aggregated product offers in real-time using Server-Sent Events (SSE) format.
+    Each store's products are sent as JSON events as soon as they're found.
+    
+    **Parameters:**
+    - `query` (required): Product to search for
+    - `zipcode` (required): 5-digit ZIP code
+    - `stores` (optional): Comma-separated store names (e.g., "Walmart,Target,ALDI")
+    - `limit` (optional): Max products per store (default: 8)
+    
+    **Example:**
+    ```
+    GET /products/aggregate/stream?query=oat+milk&zipcode=38125&stores=Walmart,Target,ALDI
+    ```
+    
+    **Response Format (Server-Sent Events):**
+    ```
+    data: {"type": "start", "query": "oat milk", "stores": [...]}
+    
+    data: {"type": "store_products", "store": "Walmart", "products": [...], "count": 5}
+    
+    data: {"type": "store_products", "store": "Target", "products": [...], "count": 3}
+    
+    data: {"type": "complete", "total_products": 8, "stores_searched": ["Walmart", "Target"]}
+    ```
+    
+    **Benefits:**
+    - See results immediately as each store responds
+    - No waiting for slow stores
+    - Better user experience with progressive loading
+    - Perfect for real-time price comparison UIs
+    """,
+)
+async def aggregate_products_stream(
+    query: str = Query(..., description="Product to search for", example="oat milk"),
+    zipcode: str = Query(..., description="5-digit ZIP code", example="38125"),
+    stores: Optional[str] = Query(None, description="Comma-separated store names", example="Walmart,Target,ALDI"),
+    limit: int = Query(8, ge=1, le=20, description="Max products per store")
+):
+    """Stream aggregate product comparison results in real-time"""
+    import re
+    
+    # Validate zipcode
+    if not re.match(r"^\d{5}$", zipcode):
+        raise HTTPException(status_code=400, detail="Invalid zipcode format")
+    
+    async def generate_aggregate():
+        """Generator function that yields aggregated products as they're found"""
+        try:
+            # Determine which stores to search
+            if stores:
+                store_list = [s.strip() for s in stores.split(",")]
+            else:
+                # Default stores
+                store_list = ["Walmart", "ALDI", "Kroger"]
+            
+            # Map to store IDs
+            store_ids = [s.lower().replace(" ", "_").replace("-", "_") for s in store_list]
+            
+            # Filter by location if location_service available
+            if location_service:
+                considered_store_ids = location_service.filter_stores_by_location(store_ids, zipcode)
+                if not considered_store_ids:
+                    considered_store_ids = store_ids[:3]  # Fallback to first 3
+            else:
+                considered_store_ids = store_ids
+            
+            total_products = 0
+            stores_with_results = []
+            
+            # Send initial metadata
+            yield f"data: {json.dumps({'type': 'start', 'query': query, 'stores': considered_store_ids, 'zipcode': zipcode})}\n\n"
+            
+            # Helper to convert store_id to display name
+            def to_store_name(store_id: str) -> str:
+                mapping = {
+                    "whole_foods": "Whole Foods",
+                    "sams_club": "Sam's Club",
+                    "trader_joes": "Trader Joe's",
+                    "kroger": "Kroger",
+                    "marianos": "Mariano's",
+                    "target": "Target",
+                    "walmart": "Walmart",
+                    "costco": "Costco",
+                    "aldi": "ALDI",
+                    "safeway": "Safeway",
+                    "albertsons": "Albertsons",
+                    "publix": "Publix",
+                    "heb": "H-E-B",
+                    "wegmans": "Wegmans",
+                }
+                return mapping.get(store_id, store_id.replace("_", " ").title())
+            
+            # Use a queue to collect products from all stores as they arrive
+            product_queue = asyncio.Queue()
+            semaphore = asyncio.Semaphore(5)  # Limit concurrent store searches
+            
+            async def search_store(store_id: str):
+                """Search a single store and put products in queue"""
+                async with semaphore:
+                    try:
+                        store_name = to_store_name(store_id)
+                        products = []
+                        
+                        # Try partner API first
+                        if partner_api_client and partner_api_client.has_partner_api(store_id):
+                            logger.info(f"🎯 Streaming aggregate from {store_name} partner API")
+                            products = await partner_api_client.search_products(
+                                store_id=store_id,
+                                query=query,
+                                zipcode=zipcode,
+                                limit=limit
+                            )
+                        
+                        # Fallback to Exa if no partner API or no results
+                        if not products and exa_client and exa_client.is_available():
+                            logger.info(f"🔍 Streaming aggregate from Exa for {store_name}")
+                            products = await exa_client.search_products_structured(
+                                query=query,
+                                store_name=store_name,
+                                zipcode=zipcode,
+                                num_results=limit,
+                                include_location=False,
+                                context="price_comparison"
+                            )
+                        
+                        # Format products for aggregate response
+                        formatted_products = []
+                        for p in products:
+                            formatted_products.append({
+                                "name": p.get("name"),
+                                "brand": p.get("brand"),
+                                "price": p.get("price"),
+                                "currency": p.get("currency", "USD"),
+                                "quantity": p.get("quantity") or p.get("size"),
+                                "image_url": p.get("image_url"),
+                                "product_url": p.get("product_url"),
+                                "store_name": store_name,
+                                "store_id": store_id,
+                                "store_zipcode": zipcode
+                            })
+                        
+                        # Put all products for this store in the queue
+                        await product_queue.put(("store_products", store_id, store_name, formatted_products))
+                        
+                    except Exception as e:
+                        logger.error(f"Error streaming aggregate from {store_id}: {e}")
+                        await product_queue.put(("error", store_id, to_store_name(store_id), str(e)))
+            
+            # Start all store searches concurrently
+            tasks = [asyncio.create_task(search_store(sid)) for sid in considered_store_ids]
+            
+            # Create a task to mark completion when all searches are done
+            async def mark_complete():
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await product_queue.put(("complete", None, None, None))
+            
+            completion_task = asyncio.create_task(mark_complete())
+            
+            # Yield products as they arrive in the queue
+            while True:
+                event_type, store_id, store_name, data = await product_queue.get()
+                
+                if event_type == "store_products":
+                    product_count = len(data)
+                    total_products += product_count
+                    if product_count > 0:
+                        stores_with_results.append(store_name)
+                    event_data = {
+                        "type": "store_products",
+                        "store": store_name,
+                        "store_id": store_id,
+                        "products": data,
+                        "count": product_count
+                    }
+                    yield f"data: {json.dumps(event_data)}\n\n"
+                
+                elif event_type == "error":
+                    yield f"data: {json.dumps({'type': 'error', 'store': store_name, 'error': data})}\n\n"
+                
+                elif event_type == "complete":
+                    # All stores finished
+                    yield f"data: {json.dumps({'type': 'complete', 'total_products': total_products, 'stores_searched': stores_with_results, 'zipcode': zipcode})}\n\n"
+                    break
+            
+        except Exception as e:
+            logger.error(f"Streaming aggregate error: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+    
+    return StreamingResponse(
+        generate_aggregate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # Disable nginx buffering
+        }
+    )
+
+@app.get(
     "/products/aggregate",
     response_model=AggregateResponseEnhanced,
     tags=["📊 Aggregate"],
@@ -943,6 +1301,10 @@ async def aggregate_products(
                 
                 await asyncio.gather(*[fetch_store_locations(sid) for sid in considered_store_ids], return_exceptions=True)
                 
+                # Get coordinates for the zipcode
+                geocoding_service = get_geocoding_service()
+                _, _, cached_lat, cached_lng = await geocoding_service.get_location_from_zipcode(zipcode)
+                
                 # Transform to enhanced format
                 # Get available stores for cached response (use considered_store_ids as fallback)
                 cached_stores_available = all_available_store_ids if 'all_available_store_ids' in locals() else considered_store_ids
@@ -952,7 +1314,9 @@ async def aggregate_products(
                     query, 
                     zipcode, 
                     store_locations_cache,
-                    stores_available=cached_stores_available
+                    stores_available=cached_stores_available,
+                    zipcode_lat=cached_lat,
+                    zipcode_lng=cached_lng
                 )
                 enhanced_cached["meta"]["cache"] = {"hit": True}
                 # Apply limit if needed
@@ -1489,8 +1853,13 @@ async def aggregate_products(
         # Fetch store locations concurrently
         await asyncio.gather(*[fetch_store_locations(sid) for sid in considered_store_ids], return_exceptions=True)
         
+        # Get coordinates for the zipcode to use for store locations
+        geocoding_service = get_geocoding_service()
+        geo_city, geo_state, geo_lat, geo_lng = await geocoding_service.get_location_from_zipcode(zipcode)
+        logger.info(f"📍 Geocoded {zipcode}: city={geo_city}, state={geo_state}, lat={geo_lat}, lng={geo_lng}")
+        
         # Transform to enhanced format
-        async def transform_to_enhanced_format(grouped_results: Dict[str, Any], stores_considered: List[str], query: str, zipcode: str, store_locations: Dict[str, Dict[str, Any]], stores_available: List[str] = None) -> Dict[str, Any]:
+        async def transform_to_enhanced_format(grouped_results: Dict[str, Any], stores_considered: List[str], query: str, zipcode: str, store_locations: Dict[str, Dict[str, Any]], stores_available: List[str] = None, zipcode_lat: float = None, zipcode_lng: float = None) -> Dict[str, Any]:
             """Transform grouped results to enhanced response format"""
             from datetime import datetime
             
@@ -1637,7 +2006,7 @@ async def aggregate_products(
                     else:
                         full_store_name = location_store_name or store_name
                     
-                    # Create store info
+                    # Create store info with coordinates
                     store_info = StoreInfoDetailed(
                         retailer=store_id,
                         retailer_store_id=retailer_store_id,
@@ -1645,7 +2014,9 @@ async def aggregate_products(
                         address=store_address,
                         city=store_city,
                         state=store_state,
-                        zipcode=store_zipcode
+                        zipcode=store_zipcode,
+                        latitude=zipcode_lat,
+                        longitude=zipcode_lng
                     )
                     
                     enhanced_offer_dict = {
@@ -1706,7 +2077,7 @@ async def aggregate_products(
             "source": "exa_structured_aggregate"
         }
         
-        enhanced_response = await transform_to_enhanced_format(grouped, considered_store_ids, query, zipcode, store_locations_cache, stores_available=all_available_store_ids)
+        enhanced_response = await transform_to_enhanced_format(grouped, considered_store_ids, query, zipcode, store_locations_cache, stores_available=all_available_store_ids, zipcode_lat=geo_lat, zipcode_lng=geo_lng)
 
         # Apply limit to results
         if limit and len(enhanced_response.get("results", [])) > limit:
