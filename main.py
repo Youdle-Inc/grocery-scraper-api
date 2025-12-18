@@ -1877,6 +1877,26 @@ async def aggregate_products(
                             logger.info(f"✅ Target store: {store.get('name')} at {store.get('latitude')}, {store.get('longitude')}")
                             return
                 
+                # Try Google Places API for real store locations
+                if location_service and location_service.google_api_key:
+                    places_stores = await location_service.search_stores_via_places_api(store_id, zipcode)
+                    if places_stores:
+                        place = places_stores[0]
+                        location = place.get("location", {})
+                        store_locations_cache[store_id] = {
+                            "store_id": store_id,
+                            "retailer_store_id": place.get("place_id"),
+                            "store_name": place.get("name", to_store_name(store_id)),
+                            "address": place.get("address"),
+                            "city": None,  # Not provided by Places API directly
+                            "state": None,
+                            "zipcode": zipcode,
+                            "latitude": location.get("lat"),
+                            "longitude": location.get("lng"),
+                        }
+                        logger.info(f"✅ {store_id} via Places API: {place.get('name')} at {location.get('lat')}, {location.get('lng')}")
+                        return
+                
                 # Fall back to Exa search
                 store_name = to_store_name(store_id)
                 stores = await exa_client.search_stores_in_zipcode(store_name, zipcode)
