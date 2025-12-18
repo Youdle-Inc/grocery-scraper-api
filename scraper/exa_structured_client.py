@@ -207,15 +207,17 @@ class ExaStructuredClient:
                 else:
                     base_query = f"{base_query} site:costco.com zipcode {zipcode}"
             
-            # For other stores, add general location context
+            # For all other stores, add strong universal location context
+            # This ensures products are from the user's location, not random locations
             else:
                 if city and state:
                     # Use city, state, and zipcode for best location filtering
-                    base_query = f"{base_query} near {city} {state} zipcode {zipcode}"
+                    # Include multiple location signals to strongly filter by location
+                    base_query = f"{base_query} near {city} {state} zipcode {zipcode} in {zipcode} location {city}"
                 else:
-                    # For unknown zipcodes, use explicit zipcode location filtering
+                    # For unknown zipcodes, use explicit zipcode location filtering with multiple signals
                     # Exa understands zipcodes well, so this should still work effectively
-                    base_query = f"{base_query} location zipcode {zipcode} in {zipcode}"
+                    base_query = f"{base_query} location zipcode {zipcode} in {zipcode} near {zipcode} area {zipcode}"
         
         # Explicitly exclude gift cards and non-food items
         # Exa supports exclusion with minus sign
@@ -391,9 +393,8 @@ class ExaStructuredClient:
             logger.info(f"🔍 Searching Exa for: {search_query} (Category: {category}, Context: {context or 'auto-detected'})")
             
             # OPTIMIZED: Reduced text extraction for faster processing
-            # Search with text content extraction - reduced for speed
-            # Note: Exa's search_and_contents doesn't support summary parameter
-            # Use get_contents with summary for individual URLs if needed
+            # Exa's search_and_contents DOES support summary parameter for structured extraction
+            # Using summary schemas provides structured JSON data directly from Exa
             # Increase results for Wegmans to get more products
             is_wegmans_search = store_name and store_name.lower() == "wegmans"
             wegmans_multiplier = 3 if is_wegmans_search else 2
@@ -401,8 +402,12 @@ class ExaStructuredClient:
             search_options = {
                 "query": search_query,
                 "num_results": min(num_results * wegmans_multiplier, wegmans_max),
-                "type": "neural",  # Neural search for semantic matching
-                "text": {"max_characters": 1500}  # Reduced from 3000 to 1500 for faster processing
+                "type": "auto",  # Exa 2.0: Auto balances speed and comprehensiveness
+                "text": {"max_characters": 1500},  # Reduced from 3000 to 1500 for faster processing
+                "summary": {
+                    "query": f"Extract grocery product information from this {store_name or 'grocery store'} product page. Focus on product name, brand, price, quantity/size, and availability.",
+                    "schema": product_schema
+                }
                 # Note: extras/image_links is only available in get_contents, not search_and_contents
             }
             logger.debug(f"Exa search options: {search_options}")
@@ -433,7 +438,7 @@ class ExaStructuredClient:
                         None,
                         lambda: self._client.search_and_contents(**search_options)
                     ),
-                    timeout=10.0  # 10 second timeout per store search
+                    timeout=20.0  # 20 second timeout per store search (increased for "auto" type)
                 )
                 
                 if not response:
@@ -672,8 +677,21 @@ class ExaStructuredClient:
                     logger.debug(f"Definitely skipping search/category page: {url[:60]}...")
                     return None
 
-            # Extract product data (skip async image extraction during batch for performance)
-            product = await self._extract_product_data(result, store_name, zipcode, extract_images_async=False)
+            # Try to use structured summary first (if available from Exa)
+            product = None
+            if hasattr(result, "summary") and result.summary:
+                try:
+                    summary_data = json.loads(result.summary)
+                    # Convert Exa summary to product dict format
+                    product = self._convert_summary_to_product(summary_data, result, store_name, zipcode)
+                    if product:
+                        logger.debug(f"✅ Used structured summary for: {product.get('name', 'Unknown')[:50]}...")
+                except (json.JSONDecodeError, Exception) as e:
+                    logger.debug(f"Failed to parse summary, falling back to manual extraction: {e}")
+            
+            # Fallback to manual extraction if summary not available or failed
+            if not product:
+                product = await self._extract_product_data(result, store_name, zipcode, extract_images_async=False)
             
             # Filter out gift cards and non-food items based on product name/content
             if product:
@@ -1275,6 +1293,23 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
                         logger.debug(f"🔄 Added Costco zipcode ({zipcode}) to search URL for location-based results")
                         url = updated_url
             
+            # Universal: Try to preserve/add zipcode to product URLs for location-specific results
+            # This ensures when users click product links, they see location-relevant content
+            # Skip stores that already have specific handling above (Wegmans, Costco)
+            if zipcode and url:
+                url_lower = url.lower()
+                # Only add for stores not already handled above
+                if not ('wegmans.com' in url_lower or 'costco.com' in url_lower):
+                    # Try common zipcode/location parameter patterns
+                    # Some stores use ?zip=, ?location=, ?store=, ?zipcode=, ?postal_code=
+                    zipcode_params = ["zip", "zipcode", "location", "postal_code", "postalcode"]
+                    for param in zipcode_params:
+                        updated_url = self._add_or_replace_query_param(url, param, zipcode)
+                        if updated_url != url:
+                            logger.debug(f"🔄 Added {param}={zipcode} to product URL: {url[:80]}...")
+                            url = updated_url
+                            break  # Only add one parameter
+            
             # Wegmans-specific: Extract product name from URL if title is generic
             if url and 'wegmans.com/shop/product/' in url.lower():
                 # URL format: /shop/product/{id}-{name}?store={zipcode}
@@ -1317,6 +1352,7 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
                             logger.debug(f"✅ Extracted product using {detected_store_id} extractor: {store_product.get('name', 'Unknown')[:50]}")
                             
                             # Enhance with additional data from Exa result
+                            # IMPORTANT: store_zipcode ALWAYS uses user input zipcode, never extracted from results
                             enhanced_product = {
                                 "name": store_product.get('name') or title,
                                 "brand": store_product.get('brand'),
@@ -1335,7 +1371,7 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
                                 "rating": store_product.get('rating'),
                                 "reviews_count": store_product.get('review_count'),
                                 "store_name": store_product.get('store_name') or detected_store_id.title(),
-                                "store_zipcode": zipcode,
+                                "store_zipcode": zipcode,  # ALWAYS use user input zipcode
                                 "source": "exa_structured_with_extractor"
                             }
                             
@@ -1731,6 +1767,7 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
                     availability = "Check Store"
             
             # Build product object with enhanced fields
+            # IMPORTANT: store_zipcode ALWAYS uses user input zipcode, never extracted from results
             product = {
                 "name": title,
                 "brand": brand,
@@ -1748,7 +1785,7 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
                 "rating": None,
                 "reviews_count": None,
                 "store_name": detected_store,
-                "store_zipcode": zipcode,
+                "store_zipcode": zipcode,  # ALWAYS use user input zipcode
                 "source": "exa_structured"
             }
             
@@ -1804,6 +1841,65 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
                 return store_id
         
         return None
+    
+    def _convert_summary_to_product(
+        self,
+        summary_data: Dict[str, Any],
+        result: Any,
+        store_name: Optional[str],
+        zipcode: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        """Convert Exa summary JSON to product dict format"""
+        try:
+            url = getattr(result, "url", "")
+            title = getattr(result, "title", "")
+            
+            # Detect store from URL for consistency
+            detected_store = self._detect_store_from_url(url) or store_name
+            if detected_store:
+                detected_store = detected_store.title()
+            
+            product = {
+                "name": summary_data.get("product_name") or title or "",
+                "brand": summary_data.get("brand"),
+                "price": summary_data.get("price"),
+                "currency": summary_data.get("currency", "USD"),
+                "quantity": summary_data.get("quantity"),
+                "price_per_unit": None,
+                "size": summary_data.get("quantity"),
+                "variants": None,
+                "availability": summary_data.get("availability") or "Check Store",
+                "image_url": None,  # Will be filled by image extraction
+                "product_url": url,
+                "description": summary_data.get("description"),
+                "category": summary_data.get("category"),
+                "rating": summary_data.get("rating"),
+                "reviews_count": summary_data.get("reviews_count"),
+                "store_name": detected_store or summary_data.get("store_name") or store_name,
+                "store_zipcode": zipcode,  # ALWAYS use user input zipcode, never extract from results
+                "store_city": summary_data.get("store_city"),
+                "store_state": summary_data.get("store_state"),
+                "store_address": summary_data.get("store_address"),
+                "source": "exa_structured_summary"
+            }
+            
+            # Validate price is reasonable
+            if product.get("price") is not None:
+                try:
+                    price_val = float(product["price"])
+                    if price_val <= 0 or price_val > 1000:
+                        product["price"] = None
+                except (ValueError, TypeError):
+                    product["price"] = None
+            
+            # Only return if we have at least a name and URL
+            if product.get("name") and product.get("product_url"):
+                return product
+            
+            return None
+        except Exception as e:
+            logger.debug(f"Failed to convert summary: {e}")
+            return None
     
     async def get_product_image_url(self, product_url: str) -> Optional[str]:
         """
@@ -2068,8 +2164,12 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
             search_options = {
                 "query": search_query,
                 "num_results": 10,
-                "type": "keyword",
-                "text": {"max_characters": 5000}  # Get more text to find address information
+                "type": "deep",  # Exa 2.0: Deep search for comprehensive results
+                "text": {"max_characters": 5000},  # Get more text to find address information
+                "summary": {
+                    "query": f"Extract complete store location information for this {store_chain} store. Find full street address, city, state, zipcode, and retailer store ID.",
+                    "schema": store_schema
+                }
             }
 
             if domain:
@@ -2099,9 +2199,30 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
                 store_zip = zipcode
                 retailer_store_id = None
                 
-                # Try to get structured address data using get_contents if URL is available
+                # Try structured summary first from search_and_contents result
+                if hasattr(result, "summary") and result.summary:
+                    try:
+                        summary_data = json.loads(result.summary)
+                        logger.debug(f"✅ Got structured summary from search_and_contents: {summary_data}")
+                        if summary_data.get("address"):
+                            address = summary_data["address"]
+                            logger.debug(f"✅ Extracted address from summary: {address}")
+                        if summary_data.get("city"):
+                            city = summary_data["city"]
+                        if summary_data.get("state"):
+                            state = summary_data["state"]
+                        if summary_data.get("zipcode"):
+                            store_zip = summary_data["zipcode"]
+                        if summary_data.get("retailer_store_id"):
+                            retailer_store_id = summary_data["retailer_store_id"]
+                            logger.debug(f"✅ Extracted retailer_store_id from summary: {retailer_store_id}")
+                    except (json.JSONDecodeError, Exception) as e:
+                        logger.debug(f"Failed to parse search summary, will try get_contents: {e}")
+                
+                # If we got address from search_and_contents summary, skip get_contents call
+                # Otherwise, try to get structured address data using get_contents if URL is available
                 # This gives us better structured data extraction with explicit prompts
-                if url:
+                if url and not address:
                     try:
                         detail_response = await asyncio.get_event_loop().run_in_executor(
                             None,

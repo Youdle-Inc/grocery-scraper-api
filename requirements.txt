@@ -8,8 +8,8 @@ requests==2.31.0
 python-dotenv==1.0.0
 aiohttp==3.9.1  # Also used for Google Geocoding/Places API calls
 
-# Exa Search API
-exa-py==1.0.8
+# Exa Search API (Exa 2.0 with fast/deep search types and summary schemas)
+exa-py>=1.8.0
 
 # Caching
 redis[hiredis]==5.0.1
