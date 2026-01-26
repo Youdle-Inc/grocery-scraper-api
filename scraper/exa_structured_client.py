@@ -207,7 +207,14 @@ class ExaStructuredClient:
                     base_query = f"{base_query} site:costco.com near {city} {state} zipcode {zipcode}"
                 else:
                     base_query = f"{base_query} site:costco.com zipcode {zipcode}"
-            
+
+            # For Cash Saver, use site: syntax for better results (JS-heavy site)
+            elif store_name and store_name.lower() == "cash_saver":
+                if city and state:
+                    base_query = f"{base_query} site:shop.memphiscashsaver.com near {city} {state}"
+                else:
+                    base_query = f"{base_query} site:shop.memphiscashsaver.com Memphis TN"
+
             # For all other stores, add strong universal location context
             # This ensures products are from the user's location, not random locations
             else:
@@ -414,7 +421,9 @@ class ExaStructuredClient:
             logger.debug(f"Exa search options: {search_options}")
 
             # Add domain filter if store specified
-            if store_name:
+            # Skip include_domains for stores that already use site: in query (wegmans, costco, cash_saver)
+            stores_with_site_syntax = ["wegmans", "costco", "cash_saver"]
+            if store_name and store_name.lower() not in stores_with_site_syntax:
                 domain = self._get_store_domain(store_name)
                 logger.info(f"🔍 Store name: '{store_name}' -> Domain: '{domain}'")
                 if domain:
@@ -434,12 +443,15 @@ class ExaStructuredClient:
                 logger.info(f"📡 Calling Exa API with query: {search_query}")
                 logger.debug(f"📋 Search options: {search_options}")
                 # Add timeout to prevent hanging
+                # JS-heavy sites (cash_saver) need longer timeout for content extraction
+                js_heavy_stores = ["cash_saver"]
+                timeout_seconds = 35.0 if store_name and store_name.lower() in js_heavy_stores else 20.0
                 response = await asyncio.wait_for(
                     asyncio.get_event_loop().run_in_executor(
                         None,
                         lambda: self._client.search_and_contents(**search_options)
                     ),
-                    timeout=20.0  # 20 second timeout per store search (increased for "auto" type)
+                    timeout=timeout_seconds
                 )
                 
                 if not response:
