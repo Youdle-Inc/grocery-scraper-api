@@ -1473,6 +1473,208 @@ class CostcoExtractor(StoreProductExtractor):
         return None
 
 
+class CashSaverExtractor(StoreProductExtractor):
+    """Extractor for Memphis Cash Saver (shop.memphiscashsaver.com) product cards
+
+    Cash Saver uses a WordPress-based e-commerce platform with:
+    - Product listings in grid format
+    - AJAX-loaded content via wp-admin/admin-ajax.php
+    - Lazy loading for images
+    """
+
+    def extract_products(self, html: str, store_id: str = "cash_saver") -> List[Dict[str, Any]]:
+        """Extract products from Cash Saver HTML content"""
+        products = []
+
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+
+            # Try multiple selectors for WordPress grocery e-commerce sites
+            product_selectors = [
+                '[class*="product"]',
+                '[class*="item-card"]',
+                '.sow-image-grid-image',
+                '[data-product-id]',
+                '.woocommerce-product',
+                '[class*="ProductCard"]',
+                '.product-card',
+                '.product-item',
+            ]
+
+            for selector in product_selectors:
+                cards = soup.select(selector)
+                if cards:
+                    logger.debug(f"Cash Saver: Trying selector '{selector}', found {len(cards)} elements")
+                    for card in cards[:20]:  # Limit to first 20
+                        try:
+                            product = self._extract_product(card, store_id)
+                            if product and self._is_valid_individual_product(product):
+                                products.append(product)
+                                logger.debug(f"Extracted Cash Saver product: {product.get('name', 'Unknown')[:50]}")
+                        except Exception as e:
+                            logger.debug(f"Failed to extract Cash Saver product: {e}")
+                            continue
+                    if products:
+                        break
+
+            # Fallback: Try JSON-LD structured data
+            if not products:
+                json_ld_scripts = soup.find_all('script', type='application/ld+json')
+                for script in json_ld_scripts:
+                    try:
+                        import json
+                        data = json.loads(script.string)
+                        if isinstance(data, dict) and data.get('@type') == 'Product':
+                            product = self._extract_from_json_ld(data, store_id)
+                            if product and self._is_valid_individual_product(product):
+                                products.append(product)
+                        elif isinstance(data, list):
+                            for item in data:
+                                if isinstance(item, dict) and item.get('@type') == 'Product':
+                                    product = self._extract_from_json_ld(item, store_id)
+                                    if product and self._is_valid_individual_product(product):
+                                        products.append(product)
+                    except (json.JSONDecodeError, KeyError, TypeError):
+                        continue
+
+            # Fallback: Extract from plain text (Exa may return text content)
+            if not products:
+                text_products = self._extract_products_from_text(html, store_id)
+                if text_products:
+                    products.extend(text_products)
+                    logger.debug(f"Extracted {len(text_products)} Cash Saver products from plain text")
+
+            logger.info(f"Extracted {len(products)} products from Cash Saver content")
+
+        except Exception as e:
+            logger.error(f"Failed to parse Cash Saver content: {e}")
+
+        return products
+
+    def _extract_product(self, card, store_id: str) -> Optional[Dict[str, Any]]:
+        """Extract a single product from a Cash Saver product card"""
+        product = {
+            'store_id': store_id,
+            'store_name': 'Cash Saver',
+            'name': None,
+            'price': None,
+            'price_display': None,
+            'image_url': None,
+            'product_url': None,
+            'availability': 'Check Store'
+        }
+
+        # Extract product name from various selectors
+        name_selectors = ['h3', 'h2', 'h4', '[class*="title"]', '[class*="name"]', '.product-title', '.product-name']
+        for sel in name_selectors:
+            name_el = card.select_one(sel)
+            if name_el:
+                product['name'] = name_el.get_text(strip=True)
+                break
+
+        # Extract price
+        price_selectors = ['[class*="price"]', '[class*="Price"]', '.amount', '.woocommerce-Price-amount']
+        for sel in price_selectors:
+            price_el = card.select_one(sel)
+            if price_el:
+                price_text = price_el.get_text(strip=True)
+                product['price_display'] = price_text
+                product['price'] = self._normalize_price(price_text)
+                break
+
+        # Extract image
+        img_el = card.select_one('img')
+        if img_el:
+            product['image_url'] = img_el.get('src') or img_el.get('data-src') or img_el.get('data-lazy-src', '')
+            # Fallback: get name from alt text if we don't have it
+            if not product['name'] and img_el.get('alt'):
+                product['name'] = img_el.get('alt')
+
+        # Extract product URL
+        link_el = card.select_one('a')
+        if link_el:
+            href = link_el.get('href', '')
+            if href.startswith('/'):
+                product['product_url'] = f"https://shop.memphiscashsaver.com{href}"
+            elif href.startswith('http'):
+                product['product_url'] = href
+
+        # Only return if we have at least a name
+        if product['name']:
+            return product
+
+        return None
+
+    def _extract_from_json_ld(self, data: dict, store_id: str) -> Optional[Dict[str, Any]]:
+        """Extract product from JSON-LD structured data"""
+        product = {
+            'store_id': store_id,
+            'store_name': 'Cash Saver',
+            'name': data.get('name'),
+            'price': None,
+            'price_display': None,
+            'image_url': data.get('image'),
+            'product_url': data.get('url'),
+            'availability': 'Check Store'
+        }
+
+        # Extract price from offers
+        offers = data.get('offers', {})
+        if isinstance(offers, dict):
+            price = offers.get('price')
+            if price:
+                product['price'] = float(price)
+                product['price_display'] = f"${price}"
+
+        if product['name']:
+            return product
+        return None
+
+    def _extract_products_from_text(self, text: str, store_id: str) -> List[Dict[str, Any]]:
+        """Extract products from plain text content (Exa may return text instead of HTML)"""
+        products = []
+
+        # Look for price patterns in text: $X.XX or X.XX
+        price_pattern = r'\$?(\d+\.?\d*)'
+
+        # Split text into potential product blocks
+        lines = text.split('\n')
+
+        current_product = None
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Check if this line looks like a price
+            price_match = re.search(r'\$(\d+\.?\d*)', line)
+
+            # If line doesn't contain a price and isn't too short, it might be a product name
+            if not price_match and len(line) > 3 and len(line) < 100:
+                # Start a new product
+                if current_product and current_product.get('name'):
+                    products.append(current_product)
+
+                current_product = {
+                    'store_id': store_id,
+                    'store_name': 'Cash Saver',
+                    'name': line,
+                    'price': None,
+                    'price_display': None,
+                    'availability': 'Check Store'
+                }
+            elif price_match and current_product:
+                # Add price to current product
+                current_product['price'] = float(price_match.group(1))
+                current_product['price_display'] = f"${price_match.group(1)}"
+
+        # Don't forget the last product
+        if current_product and current_product.get('name') and self._is_valid_individual_product(current_product):
+            products.append(current_product)
+
+        return products
+
+
 # Factory function to get the right extractor
 def get_extractor(store_id: str) -> StoreProductExtractor:
     """Get the appropriate extractor for a store"""
@@ -1486,6 +1688,7 @@ def get_extractor(store_id: str) -> StoreProductExtractor:
         'albertsons': SafewayExtractor(),  # Similar structure
         'wegmans': WegmansExtractor(),
         'costco': CostcoExtractor(),
+        'cash_saver': CashSaverExtractor(),
     }
     
     return extractors.get(store_id.lower(), StoreProductExtractor())

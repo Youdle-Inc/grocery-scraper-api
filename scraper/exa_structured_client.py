@@ -71,6 +71,7 @@ class ExaStructuredClient:
         "publix": "publix.com",
         "heb": "heb.com",
         "wegmans": "wegmans.com",
+        "cash_saver": "shop.memphiscashsaver.com",
     }
     
     def __init__(self, api_key: Optional[str] = None):
@@ -578,7 +579,25 @@ class ExaStructuredClient:
                 if not any(exclude in url_lower for exclude in exclude_aldi):
                     return True
             return False
-        
+
+        # Cash Saver (Memphis) specific filtering - WordPress-based grocery e-commerce
+        if 'memphiscashsaver.com' in url_lower or 'cashsaver' in url_lower:
+            # Cash Saver product/shop pages
+            if '/shop/' in url_lower or '/product/' in url_lower:
+                exclude_cashsaver = [
+                    '/wp-admin/',
+                    '/my-account/',
+                    '/cart/',
+                    '/checkout/',
+                    '/recipes/',
+                    '/store-locator/',
+                    '/about/',
+                    '/contact/',
+                ]
+                if not any(exclude in url_lower for exclude in exclude_cashsaver):
+                    return True
+            return False
+
         # Check for product page indicators
         product_indicators = [
             '/p/',  # Target product pages

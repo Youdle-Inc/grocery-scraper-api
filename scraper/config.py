@@ -39,6 +39,9 @@ STORE_ALIASES = {
     "mariano's": "kroger",
     "go_grocer": "target",  # Go Grocer is a convenience store chain
     "municipal_market": "target",  # Local market
+    # Cash Saver aliases
+    "cashsaver": "cash_saver",
+    "memphis_cash_saver": "cash_saver",
 }
 
 # Store configurations with working selectors and URLs

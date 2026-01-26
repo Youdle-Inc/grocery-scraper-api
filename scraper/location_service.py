@@ -49,6 +49,7 @@ class LocationService:
         "meijer": "Meijer",
         "hy_vee": "Hy-Vee",
         "sprouts": "Sprouts Farmers Market",
+        "cash_saver": "Cash Saver",
     }
     
     def __init__(self, google_api_key: Optional[str] = None):
@@ -112,6 +113,11 @@ class LocationService:
             "marianos": [
                 "60000-60999",  # Chicago suburbs (Cook, Lake, DuPage, Kane, McHenry counties)
                 "60601-60699",  # Chicago city
+            ],
+            # Cash Saver - Memphis, TN area
+            "cash_saver": [
+                "38100-38199",  # Memphis, TN core
+                "38001-38089",  # Greater Memphis/West TN
             ]
         }
     
