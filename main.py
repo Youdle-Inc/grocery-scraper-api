@@ -1200,7 +1200,7 @@ async def aggregate_products(
                         "stores_available": location_service.filter_stores_by_location(
                             ["walmart", "target", "aldi", "kroger", "marianos", "costco", "whole_foods", "sams_club", 
                              "trader_joes", "safeway", "albertsons", "wegmans", "publix", "heb", "giant_eagle",
-                             "meijer", "hy_vee", "sprouts"],
+                             "meijer", "hy_vee", "sprouts", "cash_saver"],
                             zipcode
                         )
                     }
@@ -1211,7 +1211,7 @@ async def aggregate_products(
             all_available_store_ids = location_service.filter_stores_by_location(
                 ["walmart", "target", "aldi", "kroger", "marianos", "costco", "whole_foods", "sams_club", 
                  "trader_joes", "safeway", "albertsons", "wegmans", "publix", "heb", "giant_eagle",
-                 "meijer", "hy_vee", "sprouts"],
+                 "meijer", "hy_vee", "sprouts", "cash_saver"],
                 zipcode
             )
         else:
