@@ -214,8 +214,8 @@ class WalmartAPIClient:
         # Walmart API limits to 25 results max
         limit = min(limit, 25)
         
-        # Match frontend implementation: uses start=21 (skips first 20 results)
-        url = f"{self.BASE_URL}/search?query={quote(query)}&numItems={limit}&start=21"
+        # Start from the first result for best relevance on broad grocery queries
+        url = f"{self.BASE_URL}/search?query={quote(query)}&numItems={limit}&start=1"
         headers = self._get_headers(url)
         
         try:
@@ -353,4 +353,3 @@ class WalmartAPIClient:
         except Exception as e:
             logger.error(f"Error fetching Walmart product {product_id}: {e}", exc_info=True)
             return None
-
