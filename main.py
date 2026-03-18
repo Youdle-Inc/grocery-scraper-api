@@ -856,6 +856,8 @@ _STREAM_ALL_STORES_CANDIDATES = [
 ]
 _STREAM_ALL_STORES_CAP = 15
 _STREAM_KEEPALIVE_SECONDS = 10.0
+_STREAM_MAX_IN_FLIGHT_STORE_SEARCHES = 5
+_STREAM_GENERIC_STORE_ERROR_MESSAGE = "Store search failed"
 
 
 def _sse_data(payload: Dict[str, Any]) -> str:
@@ -1031,14 +1033,16 @@ async def _stream_aggregate_sse_events(
     stores_with_results: List[str] = []
     stores_with_results_set = set()
     client_disconnected = False
+    store_search_semaphore = asyncio.Semaphore(_STREAM_MAX_IN_FLIGHT_STORE_SEARCHES)
 
     async def run_store_search(store_id: str) -> Dict[str, Any]:
         store_name = _to_store_name(store_id)
         try:
-            products = await asyncio.wait_for(
-                fetch_store_products_fn(store_id, query, zipcode, limit),
-                timeout=store_timeout_s,
-            )
+            async with store_search_semaphore:
+                products = await asyncio.wait_for(
+                    fetch_store_products_fn(store_id, query, zipcode, limit),
+                    timeout=store_timeout_s,
+                )
             return {
                 "kind": "store_products",
                 "store_id": store_id,
@@ -1060,7 +1064,7 @@ async def _stream_aggregate_sse_events(
                 "kind": "error",
                 "store_id": store_id,
                 "store_name": store_name,
-                "error": str(e),
+                "error": _STREAM_GENERIC_STORE_ERROR_MESSAGE,
             }
 
     tasks_by_store_id: Dict[str, asyncio.Task] = {
@@ -1119,11 +1123,12 @@ async def _stream_aggregate_sse_events(
                     continue
                 except Exception as e:
                     store_id = task_to_store_id.get(task, "unknown")
+                    logger.error(f"Unexpected store task failure for {store_id}: {e}", exc_info=True)
                     yield _sse_data(
                         {
                             "type": "error",
                             "store": _to_store_name(store_id),
-                            "error": str(e),
+                            "error": _STREAM_GENERIC_STORE_ERROR_MESSAGE,
                         }
                     )
                     continue

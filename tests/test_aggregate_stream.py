@@ -127,7 +127,9 @@ def test_stream_continues_after_single_store_failure(monkeypatch):
         )
     )
 
-    assert any(e["type"] == "error" and e["store"] == "Target" for e in events)
+    target_errors = [e for e in events if e["type"] == "error" and e["store"] == "Target"]
+    assert len(target_errors) == 1
+    assert target_errors[0]["error"] == main._STREAM_GENERIC_STORE_ERROR_MESSAGE
     assert any(e["type"] == "store_products" and e["store_id"] == "walmart" for e in events)
     assert events[-1]["type"] == "complete"
 
@@ -272,3 +274,66 @@ def test_helper_cancels_inflight_tasks_on_disconnect(monkeypatch):
     assert not any('"type": "complete"' in chunk for chunk in chunks)
     assert cancelled["walmart"] is True
     assert cancelled["target"] is True
+
+
+def test_stream_sanitizes_unexpected_errors(monkeypatch):
+    monkeypatch.setattr(main, "partner_api_client", FakePartnerAPIClient())
+    monkeypatch.setattr(main, "location_service", FakeLocationService())
+    monkeypatch.setattr(
+        main,
+        "exa_client",
+        FakeExaClient(
+            {
+                "target": {"delay": 0.01, "error": "internal failure: secret token leaked"},
+                "walmart": {"delay": 0.01, "products": [_make_product("walmart")]},
+            }
+        ),
+    )
+
+    events = asyncio.run(
+        _collect_stream_events(
+        "/products/aggregate/stream?query=milk&zipcode=38125&stores=target,walmart&store_timeout_s=5&overall_timeout_s=10",
+        )
+    )
+
+    target_errors = [e for e in events if e["type"] == "error" and e["store"] == "Target"]
+    assert len(target_errors) == 1
+    assert target_errors[0]["error"] == main._STREAM_GENERIC_STORE_ERROR_MESSAGE
+    assert "secret token leaked" not in target_errors[0]["error"]
+
+
+def test_stream_limits_inflight_store_searches_to_five(monkeypatch):
+    monkeypatch.setattr(main, "location_service", FakeLocationService())
+
+    in_flight = {"count": 0}
+    max_in_flight = {"count": 0}
+
+    async def tracked_fetch(store_id: str, query: str, zipcode: str, limit: int):
+        in_flight["count"] += 1
+        max_in_flight["count"] = max(max_in_flight["count"], in_flight["count"])
+        try:
+            await asyncio.sleep(0.05)
+            return [_make_product(store_id)]
+        finally:
+            in_flight["count"] -= 1
+
+    async def consume():
+        chunks = []
+        async for chunk in main._stream_aggregate_sse_events(
+            query="milk",
+            zipcode="38125",
+            stores=None,
+            all_stores=True,
+            limit=2,
+            store_timeout_s=10,
+            overall_timeout_s=30,
+            fetch_store_products_fn=tracked_fetch,
+            keepalive_interval_s=0.01,
+        ):
+            chunks.append(chunk)
+        return chunks
+
+    chunks = asyncio.run(consume())
+
+    assert any('"type": "complete"' in chunk for chunk in chunks)
+    assert max_in_flight["count"] == main._STREAM_MAX_IN_FLIGHT_STORE_SEARCHES

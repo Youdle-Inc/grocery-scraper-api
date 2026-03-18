@@ -73,6 +73,8 @@ cd grocery-scraper-api
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
+# Optional (for tests only)
+pip install -r requirements-dev.txt
 ```
 
 ### 2. Configure API Keys
@@ -281,8 +283,8 @@ Stream per-store product results as they complete. This endpoint is optimized fo
 - `stores` (optional): Comma-separated store names/IDs (e.g., `walmart,target`)
 - `all_stores` (optional): If `true`, overrides `stores` and searches all location-available stores (capped at 15)
 - `limit` (optional): Max products per store (default: 8, max: 20)
-- `store_timeout_s` (optional): Per-store timeout in seconds (default: 20)
-- `overall_timeout_s` (optional): Overall stream deadline in seconds (default: 40)
+- `store_timeout_s` (optional): Per-store timeout in seconds (default: 45)
+- `overall_timeout_s` (optional): Overall stream deadline in seconds (default: 90)
 
 **Use `curl -N` so output is not buffered:**
 ```bash
@@ -296,7 +298,7 @@ data: {"type":"start","query":"oat milk","stores":["walmart","target"],"zipcode"
 
 data: {"type":"store_products","store":"Walmart","store_id":"walmart","products":[...],"count":5}
 
-data: {"type":"error","store":"Target","error":"Store search timed out after 20s"}
+data: {"type":"error","store":"Target","error":"Store search timed out after 45s"}
 
 data: {"type":"complete","total_products":5,"stores_searched":["Walmart"],"zipcode":"38125"}
 ```
@@ -386,6 +388,12 @@ grocery-scraper-api/
 
 ### Testing
 ```bash
+# Install test dependencies
+pip install -r requirements-dev.txt
+
+# Run stream endpoint tests
+pytest -q tests/test_aggregate_stream.py
+
 # Test the API endpoints
 python test_sonar.py
 
