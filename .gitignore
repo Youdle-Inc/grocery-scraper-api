@@ -76,6 +76,7 @@ coverage.xml
 test_*.py
 TEST_*.sh
 run_all_tests.sh
+!tests/test_*.py
 
 # Old documentation (keep only README.md)
 CURL_COMMANDS.md

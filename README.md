@@ -20,6 +20,9 @@ curl "https://grocery-scraper-api.vercel.app/products/search?query=milk&zipcode=
 
 # Compare products across stores
 curl "https://grocery-scraper-api.vercel.app/products/aggregate?query=eggs&zipcode=38125&limit=10"
+
+# Stream aggregate products as stores finish (recommended for frontend)
+curl -N "https://grocery-scraper-api.vercel.app/products/aggregate/stream?query=eggs&zipcode=38125&stores=walmart,target"
 ```
 
 See [TEST_CURL_COMMANDS.md](./TEST_CURL_COMMANDS.md) for comprehensive examples.
@@ -266,6 +269,46 @@ curl "http://localhost:8000/products/aggregate?query=milk&zipcode=38125&stores=t
 }
 ```
 
+### Aggregate Products Streaming (SSE - Recommended For Frontend)
+```http
+GET /products/aggregate/stream?query={product}&zipcode={zipcode}&stores={optional}&all_stores={optional}
+```
+Stream per-store product results as they complete. This endpoint is optimized for incremental UI rendering.
+
+**Parameters:**
+- `query` (required): Product to search for
+- `zipcode` (required): 5-digit ZIP code
+- `stores` (optional): Comma-separated store names/IDs (e.g., `walmart,target`)
+- `all_stores` (optional): If `true`, overrides `stores` and searches all location-available stores (capped at 15)
+- `limit` (optional): Max products per store (default: 8, max: 20)
+- `store_timeout_s` (optional): Per-store timeout in seconds (default: 20)
+- `overall_timeout_s` (optional): Overall stream deadline in seconds (default: 40)
+
+**Use `curl -N` so output is not buffered:**
+```bash
+curl -N "http://localhost:8000/products/aggregate/stream?query=oat+milk&zipcode=38125&stores=walmart,target,aldi"
+curl -N "http://localhost:8000/products/aggregate/stream?query=eggs&zipcode=38125&all_stores=true&overall_timeout_s=30"
+```
+
+**SSE Event Contract (stable):**
+```text
+data: {"type":"start","query":"oat milk","stores":["walmart","target"],"zipcode":"38125"}
+
+data: {"type":"store_products","store":"Walmart","store_id":"walmart","products":[...],"count":5}
+
+data: {"type":"error","store":"Target","error":"Store search timed out after 20s"}
+
+data: {"type":"complete","total_products":5,"stores_searched":["Walmart"],"zipcode":"38125"}
+```
+
+Notes:
+- `products` in `store_products` is always a flat per-store list (not grouped aggregate).
+- Keepalive comments (`: keepalive`) are emitted during idle periods to avoid idle disconnects.
+
+### Migration Note
+- `GET /products/aggregate` remains backward compatible and unchanged for existing consumers.
+- New frontend integrations should prefer `GET /products/aggregate/stream` for incremental rendering and partial results.
+
 ## 🔧 Configuration
 
 ### Environment Variables
@@ -438,4 +481,3 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ---
 
 **Built with ❤️ using FastAPI and Exa API**
-

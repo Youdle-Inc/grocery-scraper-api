@@ -4,15 +4,16 @@ Grocery Scraper API
 A professional FastAPI service for scraping grocery store product data
 """
 
-from fastapi import FastAPI, HTTPException, Query, Path
+from fastapi import FastAPI, HTTPException, Query, Path, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Callable, Awaitable, AsyncIterator
 import asyncio
 import os
 import json
 from datetime import datetime
 import logging
+import time
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -847,209 +848,395 @@ async def search_products_stream(
         }
     )
 
+_STREAM_DEFAULT_STORE_IDS = ["walmart", "aldi", "kroger"]
+_STREAM_ALL_STORES_CANDIDATES = [
+    "walmart", "target", "aldi", "kroger", "marianos", "costco", "whole_foods", "sams_club",
+    "trader_joes", "safeway", "albertsons", "wegmans", "publix", "heb", "giant_eagle",
+    "meijer", "hy_vee", "sprouts",
+]
+_STREAM_ALL_STORES_CAP = 15
+_STREAM_KEEPALIVE_SECONDS = 10.0
+
+
+def _sse_data(payload: Dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+def _sse_keepalive() -> str:
+    return ": keepalive\n\n"
+
+
+def _normalize_store_id(raw_store: str) -> str:
+    normalized = raw_store.lower().strip().replace("'", "").replace(" ", "_").replace("-", "_")
+    aliases = {
+        "wholefoods": "whole_foods",
+        "wholefoods_market": "whole_foods",
+        "whole_foods_market": "whole_foods",
+        "whole_foods": "whole_foods",
+        "samsclub": "sams_club",
+        "sam_club": "sams_club",
+        "mariano": "marianos",
+        "marianos": "marianos",
+        "marianos_market": "marianos",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _to_store_name(store_id: str) -> str:
+    mapping = {
+        "whole_foods": "Whole Foods",
+        "sams_club": "Sam's Club",
+        "trader_joes": "Trader Joe's",
+        "kroger": "Kroger",
+        "marianos": "Mariano's",
+        "target": "Target",
+        "walmart": "Walmart",
+        "costco": "Costco",
+        "aldi": "ALDI",
+        "safeway": "Safeway",
+        "albertsons": "Albertsons",
+        "publix": "Publix",
+        "heb": "H-E-B",
+        "wegmans": "Wegmans",
+        "giant_eagle": "Giant Eagle",
+        "hy_vee": "Hy-Vee",
+    }
+    return mapping.get(store_id, store_id.replace("_", " ").title())
+
+
+def _dedupe_store_ids(store_ids: List[str]) -> List[str]:
+    seen = set()
+    deduped = []
+    for store_id in store_ids:
+        if not store_id or store_id in seen:
+            continue
+        seen.add(store_id)
+        deduped.append(store_id)
+    return deduped
+
+
+def _resolve_aggregate_stream_store_ids(
+    stores: Optional[str],
+    all_stores: bool,
+    zipcode: str,
+) -> List[str]:
+    if all_stores:
+        requested_store_ids = list(_STREAM_ALL_STORES_CANDIDATES)
+    elif stores:
+        requested_store_ids = [_normalize_store_id(s) for s in stores.split(",") if s.strip()]
+    else:
+        requested_store_ids = list(_STREAM_DEFAULT_STORE_IDS)
+
+    requested_store_ids = _dedupe_store_ids(requested_store_ids)
+
+    from scraper.partner_api_client import is_chicago_area_zipcode
+    if is_chicago_area_zipcode(zipcode):
+        requested_store_ids = ["marianos" if sid == "kroger" else sid for sid in requested_store_ids]
+        requested_store_ids = _dedupe_store_ids(requested_store_ids)
+
+    if location_service:
+        considered_store_ids = location_service.filter_stores_by_location(requested_store_ids, zipcode)
+        if not considered_store_ids:
+            considered_store_ids = requested_store_ids[:3]
+    else:
+        considered_store_ids = requested_store_ids
+
+    considered_store_ids = _dedupe_store_ids(considered_store_ids)
+    if all_stores:
+        considered_store_ids = considered_store_ids[:_STREAM_ALL_STORES_CAP]
+
+    return considered_store_ids
+
+
+async def _fetch_store_products_for_stream(
+    store_id: str,
+    query: str,
+    zipcode: str,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    store_name = _to_store_name(store_id)
+    products: List[Dict[str, Any]] = []
+
+    if partner_api_client and partner_api_client.has_partner_api(store_id):
+        logger.info(f"🎯 Streaming aggregate from {store_name} partner API")
+        products = await partner_api_client.search_products(
+            store_id=store_id,
+            query=query,
+            zipcode=zipcode,
+            limit=limit,
+        )
+
+    if not products and exa_client and exa_client.is_available():
+        logger.info(f"🔍 Streaming aggregate from Exa for {store_name}")
+        products = await exa_client.search_products_structured(
+            query=query,
+            store_name=store_name,
+            zipcode=zipcode,
+            num_results=limit,
+            include_location=False,
+            context="price_comparison",
+        )
+
+    formatted_products: List[Dict[str, Any]] = []
+    for product in products:
+        formatted_products.append(
+            {
+                "name": product.get("name"),
+                "brand": product.get("brand"),
+                "price": product.get("price"),
+                "currency": product.get("currency", "USD"),
+                "quantity": product.get("quantity") or product.get("size"),
+                "image_url": product.get("image_url"),
+                "product_url": product.get("product_url"),
+                "store_name": store_name,
+                "store_id": store_id,
+                "store_zipcode": zipcode,
+            }
+        )
+
+    return formatted_products
+
+
+async def _stream_aggregate_sse_events(
+    query: str,
+    zipcode: str,
+    stores: Optional[str],
+    all_stores: bool,
+    limit: int,
+    store_timeout_s: int,
+    overall_timeout_s: int,
+    is_disconnected_fn: Optional[Callable[[], Awaitable[bool]]] = None,
+    fetch_store_products_fn: Optional[Callable[[str, str, str, int], Awaitable[List[Dict[str, Any]]]]] = None,
+    keepalive_interval_s: float = _STREAM_KEEPALIVE_SECONDS,
+) -> AsyncIterator[str]:
+    if fetch_store_products_fn is None:
+        fetch_store_products_fn = _fetch_store_products_for_stream
+
+    if is_disconnected_fn is None:
+        async def default_is_disconnected() -> bool:
+            return False
+        is_disconnected_fn = default_is_disconnected
+
+    considered_store_ids = _resolve_aggregate_stream_store_ids(stores, all_stores, zipcode)
+    yield _sse_data(
+        {
+            "type": "start",
+            "query": query,
+            "stores": considered_store_ids,
+            "zipcode": zipcode,
+        }
+    )
+
+    total_products = 0
+    stores_with_results: List[str] = []
+    stores_with_results_set = set()
+    client_disconnected = False
+
+    async def run_store_search(store_id: str) -> Dict[str, Any]:
+        store_name = _to_store_name(store_id)
+        try:
+            products = await asyncio.wait_for(
+                fetch_store_products_fn(store_id, query, zipcode, limit),
+                timeout=store_timeout_s,
+            )
+            return {
+                "kind": "store_products",
+                "store_id": store_id,
+                "store_name": store_name,
+                "products": products,
+            }
+        except asyncio.TimeoutError:
+            return {
+                "kind": "error",
+                "store_id": store_id,
+                "store_name": store_name,
+                "error": f"Store search timed out after {store_timeout_s}s",
+            }
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Error streaming aggregate from {store_id}: {e}", exc_info=True)
+            return {
+                "kind": "error",
+                "store_id": store_id,
+                "store_name": store_name,
+                "error": str(e),
+            }
+
+    tasks_by_store_id: Dict[str, asyncio.Task] = {
+        store_id: asyncio.create_task(run_store_search(store_id))
+        for store_id in considered_store_ids
+    }
+    pending_tasks = set(tasks_by_store_id.values())
+    task_to_store_id = {task: store_id for store_id, task in tasks_by_store_id.items()}
+    deadline_at = time.monotonic() + float(overall_timeout_s) if overall_timeout_s > 0 else None
+
+    try:
+        while pending_tasks:
+            if await is_disconnected_fn():
+                client_disconnected = True
+                logger.info("SSE client disconnected during aggregate stream; cancelling in-flight store tasks")
+                break
+
+            wait_timeout = keepalive_interval_s
+            if deadline_at is not None:
+                remaining = deadline_at - time.monotonic()
+                if remaining <= 0:
+                    remaining = 0
+                wait_timeout = min(wait_timeout, remaining)
+
+            done_tasks, pending_tasks = await asyncio.wait(
+                pending_tasks,
+                timeout=wait_timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if not done_tasks:
+                if deadline_at is not None and time.monotonic() >= deadline_at:
+                    timed_out_store_ids = [task_to_store_id[t] for t in pending_tasks]
+                    for task in pending_tasks:
+                        task.cancel()
+                    if pending_tasks:
+                        await asyncio.gather(*pending_tasks, return_exceptions=True)
+                    pending_tasks = set()
+                    for store_id in timed_out_store_ids:
+                        yield _sse_data(
+                            {
+                                "type": "error",
+                                "store": _to_store_name(store_id),
+                                "error": f"Store search exceeded overall timeout of {overall_timeout_s}s",
+                            }
+                        )
+                    break
+
+                yield _sse_keepalive()
+                continue
+
+            for task in done_tasks:
+                try:
+                    result = task.result()
+                except asyncio.CancelledError:
+                    continue
+                except Exception as e:
+                    store_id = task_to_store_id.get(task, "unknown")
+                    yield _sse_data(
+                        {
+                            "type": "error",
+                            "store": _to_store_name(store_id),
+                            "error": str(e),
+                        }
+                    )
+                    continue
+
+                if result["kind"] == "store_products":
+                    products = result["products"]
+                    product_count = len(products)
+                    total_products += product_count
+                    if product_count > 0 and result["store_name"] not in stores_with_results_set:
+                        stores_with_results_set.add(result["store_name"])
+                        stores_with_results.append(result["store_name"])
+
+                    yield _sse_data(
+                        {
+                            "type": "store_products",
+                            "store": result["store_name"],
+                            "store_id": result["store_id"],
+                            "products": products,
+                            "count": product_count,
+                        }
+                    )
+                else:
+                    yield _sse_data(
+                        {
+                            "type": "error",
+                            "store": result["store_name"],
+                            "error": result["error"],
+                        }
+                    )
+    finally:
+        if pending_tasks:
+            for task in pending_tasks:
+                task.cancel()
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+    if not client_disconnected:
+        yield _sse_data(
+            {
+                "type": "complete",
+                "total_products": total_products,
+                "stores_searched": stores_with_results,
+                "zipcode": zipcode,
+            }
+        )
+
+
 @app.get(
     "/products/aggregate/stream",
     tags=["📊 Aggregate"],
     summary="Compare Products (Streaming)",
     description="""
-    Compare products across multiple stores with streaming results - offers are returned as they're found!
-    
-    Returns aggregated product offers in real-time using Server-Sent Events (SSE) format.
-    Each store's products are sent as JSON events as soon as they're found.
-    
+    Stream aggregate product offers in real-time using Server-Sent Events (SSE).
+
+    This endpoint is streaming-first and emits store results as soon as each store finishes.
+    A slow or failing store does not block other stores from returning data.
+
     **Parameters:**
     - `query` (required): Product to search for
     - `zipcode` (required): 5-digit ZIP code
-    - `stores` (optional): Comma-separated store names (e.g., "Walmart,Target,ALDI")
+    - `stores` (optional): Comma-separated store names/IDs (e.g., `Walmart,Target,ALDI`)
+    - `all_stores` (optional): When `true`, ignore `stores` and search all location-available stores (capped at 15)
     - `limit` (optional): Max products per store (default: 8)
-    
+    - `store_timeout_s` (optional): Per-store timeout in seconds (default: 45)
+    - `overall_timeout_s` (optional): Overall stream deadline in seconds (default: 90)
+
+    **Event Contract (stable):**
+    - `start`: `{"type":"start","query":"...","stores":["..."],"zipcode":"..."}`
+    - `store_products`: `{"type":"store_products","store":"...","store_id":"...","products":[...],"count":12}`
+    - `error`: `{"type":"error","store":"...","error":"..."}`
+    - `complete`: `{"type":"complete","total_products":123,"stores_searched":["..."],"zipcode":"..."}`
+
+    **Keepalive:**
+    - Periodic SSE comments `: keepalive` are sent during idle periods to prevent proxy/client idle disconnects.
+
     **Example:**
     ```
-    GET /products/aggregate/stream?query=oat+milk&zipcode=38125&stores=Walmart,Target,ALDI
+    curl -N "http://localhost:8000/products/aggregate/stream?query=oat+milk&zipcode=38125&stores=Walmart,Target,ALDI"
     ```
-    
-    **Response Format (Server-Sent Events):**
-    ```
-    data: {"type": "start", "query": "oat milk", "stores": [...]}
-    
-    data: {"type": "store_products", "store": "Walmart", "products": [...], "count": 5}
-    
-    data: {"type": "store_products", "store": "Target", "products": [...], "count": 3}
-    
-    data: {"type": "complete", "total_products": 8, "stores_searched": ["Walmart", "Target"]}
-    ```
-    
-    **Benefits:**
-    - See results immediately as each store responds
-    - No waiting for slow stores
-    - Better user experience with progressive loading
-    - Perfect for real-time price comparison UIs
     """,
 )
 async def aggregate_products_stream(
+    request: Request,
     query: str = Query(..., description="Product to search for", example="oat milk"),
     zipcode: str = Query(..., description="5-digit ZIP code", example="38125"),
-    stores: Optional[str] = Query(None, description="Comma-separated store names", example="Walmart,Target,ALDI"),
-    limit: int = Query(8, ge=1, le=20, description="Max products per store")
+    stores: Optional[str] = Query(None, description="Comma-separated store names or IDs", example="Walmart,Target,ALDI"),
+    all_stores: bool = Query(False, description="When true, overrides stores and searches all location-available stores"),
+    limit: int = Query(8, ge=1, le=20, description="Max products per store"),
+    store_timeout_s: int = Query(45, ge=1, le=120, description="Per-store timeout in seconds"),
+    overall_timeout_s: int = Query(90, ge=1, le=300, description="Overall stream deadline in seconds"),
 ):
-    """Stream aggregate product comparison results in real-time"""
+    """Stream aggregate product comparison results in real-time."""
     import re
-    
-    # Validate zipcode
+
     if not re.match(r"^\d{5}$", zipcode):
         raise HTTPException(status_code=400, detail="Invalid zipcode format")
-    
-    async def generate_aggregate():
-        """Generator function that yields aggregated products as they're found"""
-        try:
-            # Determine which stores to search
-            if stores:
-                store_list = [s.strip() for s in stores.split(",")]
-            else:
-                # Default stores
-                store_list = ["Walmart", "ALDI", "Kroger"]
-            
-            # Map to store IDs
-            store_ids = [s.lower().replace(" ", "_").replace("-", "_") for s in store_list]
-            
-            # Filter by location if location_service available
-            if location_service:
-                considered_store_ids = location_service.filter_stores_by_location(store_ids, zipcode)
-                if not considered_store_ids:
-                    considered_store_ids = store_ids[:3]  # Fallback to first 3
-            else:
-                considered_store_ids = store_ids
-            
-            total_products = 0
-            stores_with_results = []
-            
-            # Send initial metadata
-            yield f"data: {json.dumps({'type': 'start', 'query': query, 'stores': considered_store_ids, 'zipcode': zipcode})}\n\n"
-            
-            # Helper to convert store_id to display name
-            def to_store_name(store_id: str) -> str:
-                mapping = {
-                    "whole_foods": "Whole Foods",
-                    "sams_club": "Sam's Club",
-                    "trader_joes": "Trader Joe's",
-                    "kroger": "Kroger",
-                    "marianos": "Mariano's",
-                    "target": "Target",
-                    "walmart": "Walmart",
-                    "costco": "Costco",
-                    "aldi": "ALDI",
-                    "safeway": "Safeway",
-                    "albertsons": "Albertsons",
-                    "publix": "Publix",
-                    "heb": "H-E-B",
-                    "wegmans": "Wegmans",
-                }
-                return mapping.get(store_id, store_id.replace("_", " ").title())
-            
-            # Use a queue to collect products from all stores as they arrive
-            product_queue = asyncio.Queue()
-            semaphore = asyncio.Semaphore(5)  # Limit concurrent store searches
-            
-            async def search_store(store_id: str):
-                """Search a single store and put products in queue"""
-                async with semaphore:
-                    try:
-                        store_name = to_store_name(store_id)
-                        products = []
-                        
-                        # Try partner API first
-                        if partner_api_client and partner_api_client.has_partner_api(store_id):
-                            logger.info(f"🎯 Streaming aggregate from {store_name} partner API")
-                            products = await partner_api_client.search_products(
-                                store_id=store_id,
-                                query=query,
-                                zipcode=zipcode,
-                                limit=limit
-                            )
-                        
-                        # Fallback to Exa if no partner API or no results
-                        if not products and exa_client and exa_client.is_available():
-                            logger.info(f"🔍 Streaming aggregate from Exa for {store_name}")
-                            products = await exa_client.search_products_structured(
-                                query=query,
-                                store_name=store_name,
-                                zipcode=zipcode,
-                                num_results=limit,
-                                include_location=False,
-                                context="price_comparison"
-                            )
-                        
-                        # Format products for aggregate response
-                        formatted_products = []
-                        for p in products:
-                            formatted_products.append({
-                                "name": p.get("name"),
-                                "brand": p.get("brand"),
-                                "price": p.get("price"),
-                                "currency": p.get("currency", "USD"),
-                                "quantity": p.get("quantity") or p.get("size"),
-                                "image_url": p.get("image_url"),
-                                "product_url": p.get("product_url"),
-                                "store_name": store_name,
-                                "store_id": store_id,
-                                "store_zipcode": zipcode
-                            })
-                        
-                        # Put all products for this store in the queue
-                        await product_queue.put(("store_products", store_id, store_name, formatted_products))
-                        
-                    except Exception as e:
-                        logger.error(f"Error streaming aggregate from {store_id}: {e}")
-                        await product_queue.put(("error", store_id, to_store_name(store_id), str(e)))
-            
-            # Start all store searches concurrently
-            tasks = [asyncio.create_task(search_store(sid)) for sid in considered_store_ids]
-            
-            # Create a task to mark completion when all searches are done
-            async def mark_complete():
-                await asyncio.gather(*tasks, return_exceptions=True)
-                await product_queue.put(("complete", None, None, None))
-            
-            completion_task = asyncio.create_task(mark_complete())
-            
-            # Yield products as they arrive in the queue
-            while True:
-                event_type, store_id, store_name, data = await product_queue.get()
-                
-                if event_type == "store_products":
-                    product_count = len(data)
-                    total_products += product_count
-                    if product_count > 0:
-                        stores_with_results.append(store_name)
-                    event_data = {
-                        "type": "store_products",
-                        "store": store_name,
-                        "store_id": store_id,
-                        "products": data,
-                        "count": product_count
-                    }
-                    yield f"data: {json.dumps(event_data)}\n\n"
-                
-                elif event_type == "error":
-                    yield f"data: {json.dumps({'type': 'error', 'store': store_name, 'error': data})}\n\n"
-                
-                elif event_type == "complete":
-                    # All stores finished
-                    yield f"data: {json.dumps({'type': 'complete', 'total_products': total_products, 'stores_searched': stores_with_results, 'zipcode': zipcode})}\n\n"
-                    break
-            
-        except Exception as e:
-            logger.error(f"Streaming aggregate error: {e}")
-            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
-    
+
     return StreamingResponse(
-        generate_aggregate(),
+        _stream_aggregate_sse_events(
+            query=query,
+            zipcode=zipcode,
+            stores=stores,
+            all_stores=all_stores,
+            limit=limit,
+            store_timeout_s=store_timeout_s,
+            overall_timeout_s=overall_timeout_s,
+            is_disconnected_fn=request.is_disconnected,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"  # Disable nginx buffering
-        }
+            "X-Accel-Buffering": "no",
+        },
     )
 
 @app.get(
