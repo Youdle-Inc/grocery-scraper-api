@@ -217,7 +217,9 @@ class LocationService:
     
     def _normalize_store_id(self, store_id: str) -> str:
         """Normalize store ID using aliases"""
-        normalized = store_id.lower().strip().replace(" ", "_")
+        normalized = store_id.lower().strip().replace(" ", "_").replace("-", "_").replace("'", "")
+        if normalized in {"marianos", "mariano"}:
+            return "marianos"
         return STORE_ALIASES.get(normalized, normalized)
     
     def is_store_available_in_zipcode(self, store_id: str, zipcode: str) -> bool:
@@ -250,9 +252,9 @@ class LocationService:
                 zipcode_int = int(zipcode)
                 return self._zipcode_in_range(zipcode_int, self.store_coverage[normalized_id])
             
-            # If store not in coverage map, assume it's available (fallback for stores without coverage data)
-            logger.debug(f"Store {normalized_id} not in coverage map, assuming available")
-            return True
+            # Fail closed for stores without explicit coverage.
+            logger.debug(f"Store {normalized_id} not in coverage map, excluding it for {zipcode}")
+            return False
             
         except ValueError:
             logger.error(f"Invalid zipcode format: {zipcode}")
@@ -431,17 +433,54 @@ class LocationService:
         normalized_id = self._normalize_store_id(store_id)
         if normalized_id in self._get_nationwide_stores():
             return True
-        
-        # Try Places API first if available
+
+        # Explicit static coverage is enough for covered stores.
+        if self.is_store_available_in_zipcode(store_id, zipcode):
+            return True
+
+        # Unknown stores are only allowed if Places can verify them nearby.
         if self.google_api_key:
             stores = await self.search_stores_via_places_api(store_id, zipcode, radius_meters)
-            if stores:
-                return True
-            # If Places API returns empty, check static coverage as fallback
-            # (API might miss some stores)
-        
-        # Fall back to static coverage
-        return self.is_store_available_in_zipcode(store_id, zipcode)
+            return bool(stores)
+
+        return False
+
+    async def resolve_store_ids_by_location(
+        self,
+        store_ids: List[str],
+        zipcode: str,
+        verify_with_api: bool = True,
+    ) -> List[str]:
+        """
+        Filter store IDs to only those that are actually available for a zipcode.
+
+        Explicit coverage is accepted immediately. Stores without coverage are
+        only included when Places verification confirms they are nearby.
+        """
+        if not store_ids:
+            return []
+
+        resolved: List[str] = []
+        seen = set()
+
+        for store_id in store_ids:
+            normalized_id = self._normalize_store_id(store_id)
+            if not normalized_id or normalized_id in seen:
+                continue
+            seen.add(normalized_id)
+
+            if self.is_store_available_in_zipcode(normalized_id, zipcode):
+                resolved.append(normalized_id)
+                continue
+
+            if verify_with_api and self.google_api_key:
+                try:
+                    if await self.verify_store_in_zipcode(normalized_id, zipcode):
+                        resolved.append(normalized_id)
+                except Exception as e:
+                    logger.warning(f"Error verifying {normalized_id} in {zipcode}: {e}")
+
+        return resolved
     
     async def get_verified_stores_for_zipcode(
         self,

@@ -455,7 +455,7 @@ class ExaStructuredClient:
                     logger.warning(f"⚠️ Search options were: {search_options}")
                 
                 # Process results
-                products = await self._process_search_results(response, store_name, zipcode)
+                products = await self._process_search_results(response, store_name, zipcode, query)
             except asyncio.TimeoutError:
                 logger.warning(f"⏱️ Exa API call timed out for {store_name}")
                 return []
@@ -495,6 +495,32 @@ class ExaStructuredClient:
             parts.append("buy online")
         
         return " ".join(parts)
+
+    def _extract_relevant_query_tokens(self, query: str) -> List[str]:
+        """Return meaningful tokens used to judge whether a result matches the query."""
+        stopwords = {
+            "and", "the", "with", "for", "from", "this", "that", "then", "than",
+            "product", "products", "item", "items", "store", "grocery", "online",
+            "buy", "shop", "price", "near", "best", "cheap", "deals", "deal"
+        }
+        tokens = []
+        for token in re.findall(r"[a-z0-9]+", query.lower()):
+            if len(token) < 3 or token in stopwords:
+                continue
+            tokens.append(token)
+        return tokens
+
+    def _is_result_relevant(self, query: str, title: str, url: str, product_name: Optional[str] = None) -> bool:
+        """Reject pages that do not meaningfully match the user's query."""
+        query_tokens = self._extract_relevant_query_tokens(query)
+        if not query_tokens:
+            return False
+
+        haystack = " ".join([title or "", product_name or "", url or ""]).lower()
+        if any(token in haystack for token in query_tokens):
+            return True
+
+        return False
     
     def _is_product_page(self, url: str, title: str) -> bool:
         """Check if URL is an actual product page, not a category/search page"""
@@ -606,7 +632,8 @@ class ExaStructuredClient:
         self,
         response: Any,
         store_name: Optional[str],
-        zipcode: Optional[str]
+        zipcode: Optional[str],
+        query: str
     ) -> List[Dict[str, Any]]:
         """Process Exa search results into structured product data - OPTIMIZED for speed"""
         products = []
@@ -620,7 +647,7 @@ class ExaStructuredClient:
             
             async def process_single_result(idx: int, result: Any):
                 async with semaphore:
-                    return await self._process_single_result(result, store_name, zipcode, idx)
+                    return await self._process_single_result(result, store_name, zipcode, query, idx)
             
             # Process all results concurrently
             tasks = [process_single_result(idx, result) for idx, result in enumerate(results)]
@@ -644,6 +671,7 @@ class ExaStructuredClient:
         result: Any,
         store_name: Optional[str],
         zipcode: Optional[str],
+        query: str,
         idx: int
     ) -> Optional[Dict[str, Any]]:
         """Process a single search result - extracted for concurrent processing"""
@@ -769,6 +797,12 @@ class ExaStructuredClient:
                         logger.debug(f"Exa image extraction failed: {e}")
             
             if product:
+                if not self._is_result_relevant(query, title, url, product.get("name")):
+                    logger.debug(
+                        f"Skipping low-relevance result for query '{query[:40]}': "
+                        f"{product.get('name', title)[:60]}..."
+                    )
+                    return None
                 logger.debug(f"✅ Added product: {product.get('name', 'Unknown')[:50]}...")
                 return product
             else:

@@ -8,6 +8,20 @@ import httpx
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import main
+from scraper.rate_limit import DEFAULT_ROUTE_LIMITS, RateLimiter, RouteLimit
+
+main.rate_limiter = RateLimiter(
+    redis_url="",
+    policies={
+        **DEFAULT_ROUTE_LIMITS,
+        "aggregate_stream": RouteLimit(
+            request_limit=1000,
+            window_seconds=60,
+            concurrent_stream_limit=10,
+            concurrent_retry_after_seconds=1,
+        ),
+    },
+)
 
 
 class FakePartnerAPIClient:
@@ -22,11 +36,17 @@ class FakeLocationService:
     def __init__(self, allowed_store_ids=None):
         self.allowed_store_ids = allowed_store_ids
 
+    def _normalize(self, store_id: str) -> str:
+        return main._normalize_store_id(store_id)
+
     def filter_stores_by_location(self, store_ids, zipcode):
         if self.allowed_store_ids is None:
-            return list(store_ids)
-        allowed = set(self.allowed_store_ids)
-        return [store_id for store_id in store_ids if store_id in allowed]
+            return [self._normalize(store_id) for store_id in store_ids]
+        allowed = {self._normalize(store_id) for store_id in self.allowed_store_ids}
+        return [self._normalize(store_id) for store_id in store_ids if self._normalize(store_id) in allowed]
+
+    async def resolve_store_ids_by_location(self, store_ids, zipcode):
+        return self.filter_stores_by_location(store_ids, zipcode)
 
 
 class FakeExaClient:
@@ -63,6 +83,12 @@ def _make_product(store_id: str, suffix: str = "1"):
     }
 
 
+def _make_product_with_availability(store_id: str, availability: str):
+    product = _make_product(store_id)
+    product["availability"] = availability
+    return product
+
+
 async def _collect_stream_events(url: str):
     events = []
     transport = httpx.ASGITransport(app=main.app)
@@ -88,8 +114,8 @@ def test_stream_emits_fast_store_before_slow_store(monkeypatch):
         "exa_client",
         FakeExaClient(
             {
-                "target": {"delay": 0.02, "products": [_make_product("target")]},
-                "walmart": {"delay": 0.30, "products": [_make_product("walmart")]},
+                "target": {"delay": 0.02, "products": [_make_product_with_availability("target", "In Stock")]},
+                "walmart": {"delay": 0.30, "products": [_make_product_with_availability("walmart", "Limited Stock")]},
             }
         ),
     )
@@ -104,6 +130,8 @@ def test_stream_emits_fast_store_before_slow_store(monkeypatch):
     assert len(store_events) == 2
     assert store_events[0]["store_id"] == "target"
     assert store_events[1]["store_id"] == "walmart"
+    assert store_events[0]["products"][0]["availability"] == "IN_STOCK"
+    assert store_events[1]["products"][0]["availability"] == "LOW_STOCK"
     assert events[-1]["type"] == "complete"
 
 
@@ -231,6 +259,36 @@ def test_all_stores_overrides_stores_and_caps_to_15(monkeypatch):
     assert start["type"] == "start"
     assert "walmart" in start["stores"]
     assert len(start["stores"]) == 15
+
+
+def test_resolve_aggregate_stream_store_ids_returns_empty_when_location_filters_everything(monkeypatch):
+    monkeypatch.setattr(main, "location_service", FakeLocationService(allowed_store_ids=[]))
+
+    store_ids = asyncio.run(
+        main._resolve_aggregate_stream_store_ids(
+            stores="target,walmart",
+            all_stores=False,
+            zipcode="38125",
+        )
+    )
+
+    assert store_ids == []
+
+
+def test_stream_start_only_includes_nearby_stores(monkeypatch):
+    monkeypatch.setattr(main, "partner_api_client", FakePartnerAPIClient())
+    monkeypatch.setattr(main, "location_service", FakeLocationService(allowed_store_ids=["target"]))
+    monkeypatch.setattr(main, "exa_client", FakeExaClient({}))
+
+    events = asyncio.run(
+        _collect_stream_events(
+            "/products/aggregate/stream?query=milk&zipcode=60601&stores=target,heb&store_timeout_s=5&overall_timeout_s=10",
+        )
+    )
+
+    start_events = [e for e in events if e["type"] == "start"]
+    assert len(start_events) == 1
+    assert start_events[0]["stores"] == ["target"]
 
 
 def test_helper_cancels_inflight_tasks_on_disconnect(monkeypatch):

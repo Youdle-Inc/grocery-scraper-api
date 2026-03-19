@@ -34,6 +34,7 @@ from scraper.cache import Cache, stores_key, products_key
 from scraper.exa_structured_client import ExaStructuredClient, set_image_cache
 from scraper.image_cache import ProductImageCache
 from scraper.partner_api_client import PartnerAPIClient
+from scraper.rate_limit import RateLimiter, get_client_ip, resolve_route_key
 from scraper.models import (
     HealthResponse,
     StoresResponse,
@@ -183,10 +184,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+rate_limiter = RateLimiter()
+
 # Mount static files
 # Static files removed for Vercel compatibility
 
 from fastapi.openapi.docs import get_redoc_html
+
+
+@app.middleware("http")
+async def enforce_rate_limits(request: Request, call_next):
+    """Apply IP-based request-start limits before expensive endpoints run."""
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    route_key = resolve_route_key(request.url.path)
+    if route_key is None:
+        return await call_next(request)
+
+    client_ip = get_client_ip(request)
+    decision = await rate_limiter.allow_request(client_ip, route_key)
+    if not decision.allowed:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "detail": "Rate limit exceeded",
+                "retry_after_seconds": decision.retry_after_seconds,
+                "limit": decision.limit,
+            },
+            headers={
+                "Retry-After": str(decision.retry_after_seconds),
+            },
+        )
+
+    return await call_next(request)
 
 @app.get("/", response_class=HTMLResponse, tags=["meta"], include_in_schema=False)
 async def root():
@@ -507,6 +538,22 @@ async def search_products(
                 if is_chicago_area_zipcode(zipcode):
                     store_id = "marianos"
                     logger.info(f"📍 Chicago area zipcode ({zipcode}) detected, mapping Kroger to Mariano's")
+
+            if zipcode and location_service:
+                allowed_store_ids = await _resolve_store_ids_by_location([store_id], zipcode)
+                if store_id not in allowed_store_ids:
+                    logger.info(f"📍 Excluding {store_name} for zipcode {zipcode} because it is not nearby")
+                    return {
+                        "query": query,
+                        "store_name": store_name,
+                        "location": zipcode or "All Locations",
+                        "products_found": 0,
+                        "search_timestamp": datetime.now().isoformat(),
+                        "products": [],
+                        "source": "location_filtered",
+                        "api_version": "2.0.0",
+                        "cache": {"hit": False},
+                    }
             
             if partner_api_client and partner_api_client.has_partner_api(store_id):
                 logger.info(f"🎯 Using official {store_name} API for '{query}'")
@@ -733,15 +780,26 @@ async def verify_price(
     """,
 )
 async def search_products_stream(
+    request: Request,
     query: str = Query(..., description="Product search query", example="oat milk"),
     stores: Optional[str] = Query(None, description="Comma-separated store names", example="Target,Walmart"),
     zipcode: Optional[str] = Query(None, description="5-digit ZIP code", example="38125"),
     num_results: int = Query(5, ge=1, le=20, description="Results per store")
 ):
     """Stream product search results in real-time"""
-    
+    client_ip = get_client_ip(request)
+    stream_decision = await rate_limiter.acquire_stream(client_ip, "search_stream")
+    if not stream_decision.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many concurrent streaming requests. Please try again later.",
+            headers={"Retry-After": str(stream_decision.retry_after_seconds)},
+        )
+
     async def generate_products():
         """Generator function that yields products as they're found"""
+        tasks: List[asyncio.Task] = []
+        completion_task: Optional[asyncio.Task] = None
         try:
             # Determine which stores to search
             if stores:
@@ -749,6 +807,10 @@ async def search_products_stream(
             else:
                 # Default stores
                 store_list = ["Walmart", "Target", "ALDI"]
+
+            if zipcode and location_service:
+                allowed_store_ids = set(await _resolve_store_ids_by_location(store_list, zipcode))
+                store_list = [store for store in store_list if _normalize_store_id(store) in allowed_store_ids]
             
             total_products = 0
             
@@ -758,7 +820,6 @@ async def search_products_stream(
             # Use a queue to collect products from all stores as they arrive
             product_queue = asyncio.Queue()
             semaphore = asyncio.Semaphore(5)  # Limit concurrent store searches
-            active_tasks = len(store_list)
             
             async def search_store(store_name: str):
                 """Search a single store and put products in queue"""
@@ -837,6 +898,18 @@ async def search_products_stream(
         except Exception as e:
             logger.error(f"Streaming error: {e}")
             yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if completion_task and not completion_task.done():
+                completion_task.cancel()
+            pending_cleanup = [task for task in tasks if not task.done()]
+            if completion_task is not None:
+                pending_cleanup.append(completion_task)
+            if pending_cleanup:
+                await asyncio.gather(*pending_cleanup, return_exceptions=True)
+            await rate_limiter.release_stream(client_ip, "search_stream")
     
     return StreamingResponse(
         generate_products(),
@@ -906,6 +979,33 @@ def _to_store_name(store_id: str) -> str:
     return mapping.get(store_id, store_id.replace("_", " ").title())
 
 
+def _normalize_availability_status(availability: Optional[str]) -> str:
+    if not availability:
+        return "CHECK_STORE"
+
+    if availability in ["IN_STOCK", "OUT_OF_STOCK", "LOW_STOCK", "CHECK_STORE"]:
+        return availability
+
+    availability_lower = availability.lower()
+    if "stock" in availability_lower:
+        if "out" in availability_lower:
+            return "OUT_OF_STOCK"
+        if "low" in availability_lower or "limited" in availability_lower:
+            return "LOW_STOCK"
+        return "IN_STOCK"
+
+    if availability_lower == "in stock":
+        return "IN_STOCK"
+    if availability_lower == "out of stock":
+        return "OUT_OF_STOCK"
+    if availability_lower == "limited stock":
+        return "LOW_STOCK"
+    if availability_lower == "check store":
+        return "CHECK_STORE"
+
+    return availability.upper().replace(" ", "_")
+
+
 def _dedupe_store_ids(store_ids: List[str]) -> List[str]:
     seen = set()
     deduped = []
@@ -917,7 +1017,18 @@ def _dedupe_store_ids(store_ids: List[str]) -> List[str]:
     return deduped
 
 
-def _resolve_aggregate_stream_store_ids(
+async def _resolve_store_ids_by_location(store_ids: List[str], zipcode: str) -> List[str]:
+    if not store_ids or not location_service:
+        return []
+
+    resolver = getattr(location_service, "resolve_store_ids_by_location", None)
+    if callable(resolver):
+        return await resolver(store_ids, zipcode)
+
+    return location_service.filter_stores_by_location(store_ids, zipcode)
+
+
+async def _resolve_aggregate_stream_store_ids(
     stores: Optional[str],
     all_stores: bool,
     zipcode: str,
@@ -936,12 +1047,7 @@ def _resolve_aggregate_stream_store_ids(
         requested_store_ids = ["marianos" if sid == "kroger" else sid for sid in requested_store_ids]
         requested_store_ids = _dedupe_store_ids(requested_store_ids)
 
-    if location_service:
-        considered_store_ids = location_service.filter_stores_by_location(requested_store_ids, zipcode)
-        if not considered_store_ids:
-            considered_store_ids = requested_store_ids[:3]
-    else:
-        considered_store_ids = requested_store_ids
+    considered_store_ids = await _resolve_store_ids_by_location(requested_store_ids, zipcode)
 
     considered_store_ids = _dedupe_store_ids(considered_store_ids)
     if all_stores:
@@ -981,6 +1087,7 @@ async def _fetch_store_products_for_stream(
 
     formatted_products: List[Dict[str, Any]] = []
     for product in products:
+        availability = _normalize_availability_status(product.get("availability"))
         formatted_products.append(
             {
                 "name": product.get("name"),
@@ -990,6 +1097,7 @@ async def _fetch_store_products_for_stream(
                 "quantity": product.get("quantity") or product.get("size"),
                 "image_url": product.get("image_url"),
                 "product_url": product.get("product_url"),
+                "availability": availability,
                 "store_name": store_name,
                 "store_id": store_id,
                 "store_zipcode": zipcode,
@@ -1019,7 +1127,7 @@ async def _stream_aggregate_sse_events(
             return False
         is_disconnected_fn = default_is_disconnected
 
-    considered_store_ids = _resolve_aggregate_stream_store_ids(stores, all_stores, zipcode)
+    considered_store_ids = await _resolve_aggregate_stream_store_ids(stores, all_stores, zipcode)
     yield _sse_data(
         {
             "type": "start",
@@ -1225,17 +1333,33 @@ async def aggregate_products_stream(
     if not re.match(r"^\d{5}$", zipcode):
         raise HTTPException(status_code=400, detail="Invalid zipcode format")
 
+    client_ip = get_client_ip(request)
+    stream_decision = await rate_limiter.acquire_stream(client_ip, "aggregate_stream")
+    if not stream_decision.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many concurrent streaming requests. Please try again later.",
+            headers={"Retry-After": str(stream_decision.retry_after_seconds)},
+        )
+
+    async def guarded_events() -> AsyncIterator[str]:
+        try:
+            async for event in _stream_aggregate_sse_events(
+                query=query,
+                zipcode=zipcode,
+                stores=stores,
+                all_stores=all_stores,
+                limit=limit,
+                store_timeout_s=store_timeout_s,
+                overall_timeout_s=overall_timeout_s,
+                is_disconnected_fn=request.is_disconnected,
+            ):
+                yield event
+        finally:
+            await rate_limiter.release_stream(client_ip, "aggregate_stream")
+
     return StreamingResponse(
-        _stream_aggregate_sse_events(
-            query=query,
-            zipcode=zipcode,
-            stores=stores,
-            all_stores=all_stores,
-            limit=limit,
-            store_timeout_s=store_timeout_s,
-            overall_timeout_s=overall_timeout_s,
-            is_disconnected_fn=request.is_disconnected,
-        ),
+        guarded_events(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1374,7 +1498,7 @@ async def aggregate_products(
         # Filter stores by location availability
         if location_service:
             # Filter requested stores to only include those available in zipcode
-            considered_store_ids = location_service.filter_stores_by_location(requested_store_ids, zipcode)
+            considered_store_ids = await _resolve_store_ids_by_location(requested_store_ids, zipcode)
             
             # If no stores available after filtering, return empty response
             if not considered_store_ids:
@@ -1389,7 +1513,7 @@ async def aggregate_products(
                         "api_version": "2.1.0",
                         "cache": {"hit": False},
                         "stores_searched": [],
-                        "stores_available": location_service.filter_stores_by_location(
+                        "stores_available": await _resolve_store_ids_by_location(
                             ["walmart", "target", "aldi", "kroger", "marianos", "costco", "whole_foods", "sams_club", 
                              "trader_joes", "safeway", "albertsons", "wegmans", "publix", "heb", "giant_eagle",
                              "meijer", "hy_vee", "sprouts"],
@@ -1400,7 +1524,7 @@ async def aggregate_products(
             
             # Get all available stores for this zipcode (for UI display)
             # This includes all nationwide stores + regional stores available in zipcode
-            all_available_store_ids = location_service.filter_stores_by_location(
+            all_available_store_ids = await _resolve_store_ids_by_location(
                 ["walmart", "target", "aldi", "kroger", "marianos", "costco", "whole_foods", "sams_club", 
                  "trader_joes", "safeway", "albertsons", "wegmans", "publix", "heb", "giant_eagle",
                  "meijer", "hy_vee", "sprouts"],
