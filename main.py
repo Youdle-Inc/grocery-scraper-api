@@ -792,7 +792,7 @@ async def search_products_stream(
     if not stream_decision.allowed:
         raise HTTPException(
             status_code=429,
-            detail="Too many concurrent streaming requests. Please try again later.",
+            detail="Too many concurrent streaming requests are already in progress. Wait for an active search to finish, then try again.",
             headers={"Retry-After": str(stream_decision.retry_after_seconds)},
         )
 
@@ -1338,7 +1338,7 @@ async def aggregate_products_stream(
     if not stream_decision.allowed:
         raise HTTPException(
             status_code=429,
-            detail="Too many concurrent streaming requests. Please try again later.",
+            detail="Too many concurrent streaming requests are already in progress. Wait for an active search to finish, then try again.",
             headers={"Retry-After": str(stream_decision.retry_after_seconds)},
         )
 

@@ -52,9 +52,9 @@ DEFAULT_ROUTE_LIMITS: Dict[str, RouteLimit] = {
         active_ttl_seconds=600,
     ),
     "aggregate_stream": RouteLimit(
-        request_limit=3,
+        request_limit=10,
         window_seconds=60,
-        concurrent_stream_limit=1,
+        concurrent_stream_limit=5,
         concurrent_retry_after_seconds=5,
         active_ttl_seconds=600,
     ),
