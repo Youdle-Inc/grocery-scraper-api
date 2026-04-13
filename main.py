@@ -11,6 +11,7 @@ from typing import List, Optional, Dict, Any, Callable, Awaitable, AsyncIterator
 import asyncio
 import os
 import json
+import re
 from datetime import datetime
 import logging
 import time
@@ -931,6 +932,8 @@ _STREAM_ALL_STORES_CAP = 15
 _STREAM_KEEPALIVE_SECONDS = 10.0
 _STREAM_MAX_IN_FLIGHT_STORE_SEARCHES = 5
 _STREAM_GENERIC_STORE_ERROR_MESSAGE = "Store search failed"
+_STREAM_PRICE_VERIFY_TIMEOUT_S = 6.0
+_STREAM_IMAGE_ENRICH_TIMEOUT_S = 12.0
 
 
 def _sse_data(payload: Dict[str, Any]) -> str:
@@ -1017,15 +1020,212 @@ def _dedupe_store_ids(store_ids: List[str]) -> List[str]:
     return deduped
 
 
+def _is_wegmans_logo_image(image_url: Optional[str]) -> bool:
+    if not image_url:
+        return False
+    image_lower = image_url.lower()
+    return "wegmans-og-share-img" in image_lower or "53100" in image_url
+
+
+def _is_wegmans_product_url(product_url: Optional[str]) -> bool:
+    if not product_url:
+        return False
+    product_url_lower = product_url.lower()
+    return "wegmans.com" in product_url_lower and "/shop/product/" in product_url_lower
+
+
+async def _verify_stream_product_prices(products: List[Dict[str, Any]], store_name: str) -> None:
+    if not products or not web_search_service:
+        return
+
+    products_to_verify = []
+    for product in products:
+        if product.get("price") is None and product.get("product_url"):
+            products_to_verify.append(product)
+
+    if not products_to_verify:
+        return
+
+    logger.info(f"🔍 Stream price verification for {store_name}: {len(products_to_verify)} products")
+    verified_products = await web_search_service.batch_verify_prices(products_to_verify)
+    verified_prices = {
+        p.get("product_url"): p.get("price")
+        for p in verified_products
+        if p.get("product_url") and p.get("price") is not None
+    }
+
+    if not verified_prices:
+        return
+
+    for product in products:
+        product_url = product.get("product_url")
+        if product.get("price") is None and product_url and product_url in verified_prices:
+            product["price"] = verified_prices[product_url]
+            product["price_source"] = "web_search_verified"
+
+
+async def _derive_stream_image_from_product_url(product_url: Optional[str]) -> Optional[str]:
+    if not product_url:
+        return None
+
+    url_lower = product_url.lower()
+
+    if "target.com" in url_lower and "/a-" in url_lower:
+        try:
+            pid = product_url.split("/A-")[1].split("/")[0]
+            return f"https://target.scene7.com/is/image/Target/{pid}?wid=1200&hei=1200&qlt=80&fmt=webp"
+        except Exception:
+            return None
+
+    if "walmart.com" in url_lower and "/ip/" in url_lower:
+        try:
+            match = re.search(r"/ip/[^/]+/(\d+)", url_lower)
+            if match:
+                product_id = match.group(1)
+                return f"https://i5.walmartimages.com/asr/{product_id}.jpeg?odnHeight=612&odnWidth=612&odnBg=FFFFFF"
+        except Exception:
+            return None
+
+    if "kroger.com" in url_lower and "/p/" in url_lower:
+        upc = product_url.rstrip("/").split("/")[-1]
+        if upc.isdigit():
+            return f"https://www.kroger.com/product/images/large/front/{upc}"
+
+    return None
+
+
+async def _validate_stream_image_url(session: Any, image_url: str) -> bool:
+    if not image_url or not image_url.startswith("http"):
+        return False
+
+    try:
+        import aiohttp
+
+        async with session.head(image_url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=5)) as response:
+            if response.status != 200:
+                return False
+            content_type = response.headers.get("Content-Type", "").lower()
+            if content_type.startswith("image/"):
+                return True
+            return any(ext in image_url.lower() for ext in [".jpg", ".jpeg", ".png", ".webp", ".gif"])
+    except Exception:
+        return False
+
+
+async def _enrich_stream_product_images(products: List[Dict[str, Any]], store_name: str) -> None:
+    if not products:
+        return
+
+    url_to_indices: Dict[str, List[int]] = {}
+    urls_needing_images: List[str] = []
+
+    for idx, product in enumerate(products):
+        product_url = product.get("product_url")
+        image_url = product.get("image_url")
+
+        if image_url and _is_wegmans_logo_image(image_url):
+            product["image_url"] = None
+
+        is_wegmans_product = _is_wegmans_product_url(product_url)
+        if product_url and (not product.get("image_url") or is_wegmans_product):
+            if product_url not in url_to_indices:
+                url_to_indices[product_url] = []
+                urls_needing_images.append(product_url)
+            url_to_indices[product_url].append(idx)
+
+    if not urls_needing_images:
+        return
+
+    exa_image_results: Dict[str, Optional[str]] = {}
+    if exa_client and exa_client.is_available():
+        get_batch = getattr(exa_client, "get_product_images_batch", None)
+        if callable(get_batch):
+            try:
+                exa_image_results = await get_batch(urls_needing_images, max_concurrent=5)
+            except Exception as e:
+                logger.warning(f"⚠️ Stream Exa image extraction failed for {store_name}: {e}")
+
+    for product_url, image_url in exa_image_results.items():
+        if image_url and not _is_wegmans_logo_image(image_url) and product_url in url_to_indices:
+            for idx in url_to_indices[product_url]:
+                products[idx]["image_url"] = image_url
+
+    remaining_urls = [url for url in urls_needing_images if not any(products[idx].get("image_url") for idx in url_to_indices[url])]
+
+    ai_image_results: Dict[str, str] = {}
+    wegmans_urls = [url for url in remaining_urls if _is_wegmans_product_url(url)]
+    if wegmans_urls and ai_scraper and ai_scraper.is_available():
+        try:
+            semaphore = asyncio.Semaphore(3)
+
+            async def process_wegmans_url(url: str) -> None:
+                async with semaphore:
+                    try:
+                        data = await ai_scraper.extract_product_data(url, store_name="Wegmans")
+                        image_url = data.get("image_url")
+                        if image_url and not _is_wegmans_logo_image(image_url):
+                            ai_image_results[url] = image_url
+                    except Exception:
+                        return
+
+            await asyncio.gather(*[process_wegmans_url(url) for url in wegmans_urls[:10]])
+        except Exception as e:
+            logger.warning(f"⚠️ Stream AI image extraction failed for {store_name}: {e}")
+
+    for product_url, image_url in ai_image_results.items():
+        if product_url in url_to_indices:
+            for idx in url_to_indices[product_url]:
+                products[idx]["image_url"] = image_url
+
+    remaining_urls = [url for url in urls_needing_images if not any(products[idx].get("image_url") for idx in url_to_indices[url])]
+    html_image_results: Dict[str, Optional[str]] = {}
+    if remaining_urls:
+        try:
+            async with HTMLImageExtractor() as html_extractor:
+                html_image_results = await html_extractor.extract_images_batch(
+                    remaining_urls,
+                    max_concurrent=10,
+                )
+        except Exception as e:
+            logger.warning(f"⚠️ Stream HTML image extraction failed for {store_name}: {e}")
+
+    for product_url, image_url in html_image_results.items():
+        if image_url and not _is_wegmans_logo_image(image_url) and product_url in url_to_indices:
+            for idx in url_to_indices[product_url]:
+                products[idx]["image_url"] = image_url
+
+    remaining_urls = [url for url in urls_needing_images if not any(products[idx].get("image_url") for idx in url_to_indices[url])]
+    if remaining_urls:
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            semaphore = asyncio.Semaphore(10)
+
+            async def process_fallback_url(url: str) -> None:
+                async with semaphore:
+                    derived_url = await _derive_stream_image_from_product_url(url)
+                    if not derived_url:
+                        return
+                    if not await _validate_stream_image_url(session, derived_url):
+                        return
+                    for idx in url_to_indices.get(url, []):
+                        products[idx]["image_url"] = derived_url
+
+            await asyncio.gather(*[process_fallback_url(url) for url in remaining_urls])
+
 async def _resolve_store_ids_by_location(store_ids: List[str], zipcode: str) -> List[str]:
-    if not store_ids or not location_service:
+    if not store_ids:
         return []
+
+    normalized_store_ids = _dedupe_store_ids([_normalize_store_id(store_id) for store_id in store_ids if store_id])
+    if not location_service:
+        return normalized_store_ids
 
     resolver = getattr(location_service, "resolve_store_ids_by_location", None)
     if callable(resolver):
-        return await resolver(store_ids, zipcode)
+        return await resolver(normalized_store_ids, zipcode)
 
-    return location_service.filter_stores_by_location(store_ids, zipcode)
+    return location_service.filter_stores_by_location(normalized_store_ids, zipcode)
 
 
 async def _resolve_aggregate_stream_store_ids(
@@ -1064,8 +1264,10 @@ async def _fetch_store_products_for_stream(
 ) -> List[Dict[str, Any]]:
     store_name = _to_store_name(store_id)
     products: List[Dict[str, Any]] = []
+    used_partner_api = False
 
     if partner_api_client and partner_api_client.has_partner_api(store_id):
+        used_partner_api = True
         logger.info(f"🎯 Streaming aggregate from {store_name} partner API")
         products = await partner_api_client.search_products(
             store_id=store_id,
@@ -1073,8 +1275,10 @@ async def _fetch_store_products_for_stream(
             zipcode=zipcode,
             limit=limit,
         )
+        if not products:
+            logger.info(f"⚠️ {store_name} partner API returned no results (skipping Exa for legacy products)")
 
-    if not products and exa_client and exa_client.is_available():
+    if not products and not used_partner_api and exa_client and exa_client.is_available():
         logger.info(f"🔍 Streaming aggregate from Exa for {store_name}")
         products = await exa_client.search_products_structured(
             query=query,
@@ -1084,6 +1288,31 @@ async def _fetch_store_products_for_stream(
             include_location=False,
             context="price_comparison",
         )
+
+    if products:
+        try:
+            await asyncio.wait_for(
+                _verify_stream_product_prices(products, store_name),
+                timeout=_STREAM_PRICE_VERIFY_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"⚠️ Stream price verification timed out for {store_name} after {_STREAM_PRICE_VERIFY_TIMEOUT_S:.0f}s"
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ Stream price verification failed for {store_name}: {e}")
+
+        try:
+            await asyncio.wait_for(
+                _enrich_stream_product_images(products, store_name),
+                timeout=_STREAM_IMAGE_ENRICH_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"⚠️ Stream image enrichment timed out for {store_name} after {_STREAM_IMAGE_ENRICH_TIMEOUT_S:.0f}s"
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ Stream image enrichment failed for {store_name}: {e}")
 
     formatted_products: List[Dict[str, Any]] = []
     for product in products:

@@ -211,7 +211,7 @@ class LocationService:
     def _get_nationwide_stores(self) -> Set[str]:
         """Get set of nationwide store IDs that are always available"""
         return {
-            "walmart", "target", "aldi", "kroger", "costco", 
+            "walmart", "target", "aldi", "costco",
             "whole_foods", "sams_club", "trader_joes", "safeway", "albertsons"
         }
     

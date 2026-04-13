@@ -50,8 +50,9 @@ class FakeLocationService:
 
 
 class FakeExaClient:
-    def __init__(self, behavior_by_store_id):
+    def __init__(self, behavior_by_store_id, image_results=None):
         self.behavior_by_store_id = behavior_by_store_id
+        self.image_results = image_results or {}
 
     def is_available(self):
         return True
@@ -69,6 +70,40 @@ class FakeExaClient:
             raise RuntimeError(error)
 
         return behavior.get("products", [])
+
+    async def get_product_images_batch(self, product_urls, max_concurrent=5):
+        return {url: self.image_results.get(url) for url in product_urls}
+
+
+class FakeWebSearchService:
+    def __init__(self, price_by_url):
+        self.price_by_url = price_by_url
+
+    async def batch_verify_prices(self, products):
+        verified = []
+        for product in products:
+            product_url = product.get("product_url")
+            verified.append(
+                {
+                    "product_url": product_url,
+                    "price": self.price_by_url.get(product_url),
+                }
+            )
+        return verified
+
+
+class FakeHTMLImageExtractor:
+    def __init__(self, image_by_url):
+        self.image_by_url = image_by_url
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+    async def extract_images_batch(self, product_urls, max_concurrent=10):
+        return {url: self.image_by_url.get(url) for url in product_urls}
 
 
 def _make_product(store_id: str, suffix: str = "1"):
@@ -275,6 +310,20 @@ def test_resolve_aggregate_stream_store_ids_returns_empty_when_location_filters_
     assert store_ids == []
 
 
+def test_resolve_aggregate_stream_store_ids_falls_back_when_location_service_missing(monkeypatch):
+    monkeypatch.setattr(main, "location_service", None)
+
+    store_ids = asyncio.run(
+        main._resolve_aggregate_stream_store_ids(
+            stores="Target,Walmart",
+            all_stores=False,
+            zipcode="38125",
+        )
+    )
+
+    assert store_ids == ["target", "walmart"]
+
+
 def test_stream_start_only_includes_nearby_stores(monkeypatch):
     monkeypatch.setattr(main, "partner_api_client", FakePartnerAPIClient())
     monkeypatch.setattr(main, "location_service", FakeLocationService(allowed_store_ids=["target"]))
@@ -289,6 +338,106 @@ def test_stream_start_only_includes_nearby_stores(monkeypatch):
     start_events = [e for e in events if e["type"] == "start"]
     assert len(start_events) == 1
     assert start_events[0]["stores"] == ["target"]
+
+
+def test_stream_verifies_missing_prices_before_emit(monkeypatch):
+    product = _make_product("target")
+    product_url = product["product_url"]
+    product["price"] = None
+
+    monkeypatch.setattr(main, "partner_api_client", FakePartnerAPIClient())
+    monkeypatch.setattr(main, "location_service", FakeLocationService())
+    monkeypatch.setattr(main, "web_search_service", FakeWebSearchService({product_url: 4.29}))
+    monkeypatch.setattr(main, "exa_client", FakeExaClient({"target": {"products": [product]}}))
+
+    events = asyncio.run(
+        _collect_stream_events(
+            "/products/aggregate/stream?query=milk&zipcode=38125&stores=target&store_timeout_s=5&overall_timeout_s=10",
+        )
+    )
+
+    store_events = [e for e in events if e["type"] == "store_products"]
+    assert len(store_events) == 1
+    assert store_events[0]["products"][0]["price"] == 4.29
+
+
+def test_stream_enriches_images_via_exa_batch(monkeypatch):
+    product = _make_product("target")
+    product_url = product["product_url"]
+    product["image_url"] = None
+    enriched_image = "https://cdn.example.com/target/enriched.jpg"
+
+    monkeypatch.setattr(main, "partner_api_client", FakePartnerAPIClient())
+    monkeypatch.setattr(main, "location_service", FakeLocationService())
+    monkeypatch.setattr(main, "web_search_service", None)
+    monkeypatch.setattr(
+        main,
+        "exa_client",
+        FakeExaClient({"target": {"products": [product]}}, image_results={product_url: enriched_image}),
+    )
+
+    events = asyncio.run(
+        _collect_stream_events(
+            "/products/aggregate/stream?query=milk&zipcode=38125&stores=target&store_timeout_s=5&overall_timeout_s=10",
+        )
+    )
+
+    store_events = [e for e in events if e["type"] == "store_products"]
+    assert len(store_events) == 1
+    assert store_events[0]["products"][0]["image_url"] == enriched_image
+
+
+def test_stream_enriches_images_via_html_fallback_when_exa_misses(monkeypatch):
+    product = _make_product("target")
+    product_url = product["product_url"]
+    product["image_url"] = None
+    fallback_image = "https://cdn.example.com/target/html-fallback.jpg"
+
+    monkeypatch.setattr(main, "partner_api_client", FakePartnerAPIClient())
+    monkeypatch.setattr(main, "location_service", FakeLocationService())
+    monkeypatch.setattr(main, "web_search_service", None)
+    monkeypatch.setattr(main, "ai_scraper", None)
+    monkeypatch.setattr(main, "HTMLImageExtractor", lambda: FakeHTMLImageExtractor({product_url: fallback_image}))
+    monkeypatch.setattr(main, "exa_client", FakeExaClient({"target": {"products": [product]}}, image_results={}))
+
+    events = asyncio.run(
+        _collect_stream_events(
+            "/products/aggregate/stream?query=milk&zipcode=38125&stores=target&store_timeout_s=5&overall_timeout_s=10",
+        )
+    )
+
+    store_events = [e for e in events if e["type"] == "store_products"]
+    assert len(store_events) == 1
+    assert store_events[0]["products"][0]["image_url"] == fallback_image
+
+
+def test_stream_enrichment_timeouts_fail_open(monkeypatch):
+    product = _make_product("target")
+    product["price"] = None
+    product["image_url"] = None
+
+    async def slow_price_verification(products, store_name):
+        await asyncio.sleep(0.05)
+
+    async def slow_image_enrichment(products, store_name):
+        await asyncio.sleep(0.05)
+
+    monkeypatch.setattr(main, "partner_api_client", FakePartnerAPIClient())
+    monkeypatch.setattr(main, "location_service", FakeLocationService())
+    monkeypatch.setattr(main, "exa_client", FakeExaClient({"target": {"products": [product]}}))
+    monkeypatch.setattr(main, "_verify_stream_product_prices", slow_price_verification)
+    monkeypatch.setattr(main, "_enrich_stream_product_images", slow_image_enrichment)
+    monkeypatch.setattr(main, "_STREAM_PRICE_VERIFY_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(main, "_STREAM_IMAGE_ENRICH_TIMEOUT_S", 0.01)
+
+    events = asyncio.run(
+        _collect_stream_events(
+            "/products/aggregate/stream?query=milk&zipcode=38125&stores=target&store_timeout_s=5&overall_timeout_s=10",
+        )
+    )
+
+    assert any(e["type"] == "store_products" and e["store_id"] == "target" for e in events)
+    assert any(e["type"] == "complete" for e in events)
 
 
 def test_helper_cancels_inflight_tasks_on_disconnect(monkeypatch):
