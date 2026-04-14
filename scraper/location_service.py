@@ -211,7 +211,7 @@ class LocationService:
     def _get_nationwide_stores(self) -> Set[str]:
         """Get set of nationwide store IDs that are always available"""
         return {
-            "walmart", "target", "aldi", "costco",
+            "walmart", "target", "aldi", "kroger", "costco", 
             "whole_foods", "sams_club", "trader_joes", "safeway", "albertsons"
         }
     
@@ -362,7 +362,7 @@ class LocationService:
                 "location": f"{lat},{lng}",
                 "radius": radius_meters,
                 "keyword": search_term,
-                "type": "store",
+                "type": "supermarket",
                 "key": self.google_api_key
             }
             

@@ -332,7 +332,7 @@ class ExaStructuredClient:
                     },
                     "price": {
                         "type": "number",
-                        "description": "Price in USD. Omit this field when exact price is missing or unreliable."
+                        "description": "Price in USD"
                     },
                     "currency": {
                         "type": "string",
@@ -387,7 +387,7 @@ class ExaStructuredClient:
                         "description": "Confidence in data accuracy (0-1)"
                     }
                 },
-                "required": ["product_name"]
+                "required": ["product_name", "price"]
             }
             
             logger.info(f"🔍 Searching Exa for: {search_query} (Category: {category}, Context: {context or 'auto-detected'})")
@@ -405,7 +405,7 @@ class ExaStructuredClient:
                 "type": "auto",  # Exa 2.0: Auto balances speed and comprehensiveness
                 "text": {"max_characters": 1500},  # Reduced from 3000 to 1500 for faster processing
                 "summary": {
-                    "query": f"Extract grocery product information from this {store_name or 'grocery store'} product page. Focus on product name, brand, price, quantity/size, and availability. If exact price is not present or not reliable, return null for price.",
+                    "query": f"Extract grocery product information from this {store_name or 'grocery store'} product page. Focus on product name, brand, price, quantity/size, and availability.",
                     "schema": product_schema
                 }
                 # Note: extras/image_links is only available in get_contents, not search_and_contents
@@ -988,30 +988,6 @@ class ExaStructuredClient:
         
         return None
     
-    def _normalize_price_value(self, raw_price: Any) -> Optional[float]:
-        """Normalize price value to float or None for unknown/invalid values."""
-        if raw_price is None or isinstance(raw_price, bool):
-            return None
-
-        if isinstance(raw_price, str):
-            cleaned = raw_price.strip()
-            if not cleaned:
-                return None
-            if cleaned.lower() in {"null", "none", "n/a", "na", "unknown", "check store"}:
-                return None
-        else:
-            cleaned = raw_price
-
-        try:
-            price_value = float(cleaned)
-        except (ValueError, TypeError):
-            return None
-
-        if not (0.01 <= price_value <= 1000):
-            return None
-
-        return price_value
-
     async def _get_price_from_exa(self, url: Optional[str], store_name: Optional[str] = None) -> Optional[float]:
         """
         Get price from Exa using structured extraction with store-specific optimizations.
@@ -1059,7 +1035,7 @@ class ExaStructuredClient:
                 "properties": {
                     "price": {
                         "type": "number",
-                        "description": f"Product price in USD as a number (e.g., 4.65, 12.50, 29.99). {store_hint} Extract ONLY the main product price, not unit prices, sale prices, or 'was' prices. Return the numeric value without currency symbols. Omit this field if exact price is missing or unreliable."
+                        "description": f"Product price in USD as a number (e.g., 4.65, 12.50, 29.99). {store_hint} Extract ONLY the main product price, not unit prices, sale prices, or 'was' prices. Return the numeric value without currency symbols. Omit this field when exact price is missing or unreliable."
                     },
                     "price_text": {
                         "type": "string",
@@ -1111,34 +1087,28 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
                         summary_data = json.loads(result.summary)
                         exa_price = summary_data.get("price")
                         confidence = summary_data.get("confidence", "medium")
-                        price_text = summary_data.get("price_text")
-                        normalized_price_text = (
-                            price_text.strip().lower()
-                            if isinstance(price_text, str)
-                            else ""
-                        )
                         
-                        if exa_price is None:
-                            logger.debug(f"⚠️ No price found in Exa extraction for {store_name or 'unknown store'}")
-                        else:
-                            price_value = self._normalize_price_value(exa_price)
-                            if price_value is not None:
-                                if confidence == "low":
-                                    if normalized_price_text and normalized_price_text != "null":
-                                        logger.debug(
-                                            f"⚠️ Ignoring low-confidence Exa price for {store_name or 'unknown store'} "
-                                            f"despite price_text={price_text!r}: {price_value}"
-                                        )
-                                    else:
+                        if exa_price is not None:
+                            try:
+                                price_value = float(exa_price)
+                                # Validate price is reasonable
+                                if 0.01 <= price_value <= 1000:
+                                    if confidence == "low":
                                         logger.debug(
                                             f"⚠️ Ignoring low-confidence Exa price for {store_name or 'unknown store'}: {price_value}"
                                         )
-                                    return None
-                                # Log with confidence level
-                                confidence_msg = f" (confidence: {confidence})" if confidence else ""
-                                logger.debug(f"✅ Got price from Exa structured extraction{' for ' + store_name if store_name else ''}: ${price_value}{confidence_msg}")
-                                return price_value
-                            logger.debug(f"⚠️ Invalid or out-of-range Exa price: {exa_price}")
+                                        return None
+                                    # Log with confidence level
+                                    confidence_msg = f" (confidence: {confidence})" if confidence else ""
+                                    logger.debug(f"✅ Got price from Exa structured extraction{' for ' + store_name if store_name else ''}: ${price_value}{confidence_msg}")
+                                    return price_value
+                                else:
+                                    logger.debug(f"⚠️ Price out of range: ${price_value} (expected $0.01-$1000)")
+                            except (ValueError, TypeError) as ve:
+                                logger.debug(f"⚠️ Invalid price format: {exa_price} - {ve}")
+                                pass
+                        else:
+                            logger.debug(f"⚠️ No price found in Exa extraction for {store_name or 'unknown store'}")
                     except json.JSONDecodeError as je:
                         logger.debug(f"⚠️ Failed to parse Exa JSON response: {je}")
                         # Try to extract price from text as fallback
@@ -1146,8 +1116,8 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
                             price_match = re.search(r'\$(\d+\.\d{2})', result.text)
                             if price_match:
                                 try:
-                                    fallback_price = self._normalize_price_value(price_match.group(1))
-                                    if fallback_price is not None:
+                                    fallback_price = float(price_match.group(1))
+                                    if 0.01 <= fallback_price <= 1000:
                                         logger.debug(f"✅ Got price from text fallback: ${fallback_price}")
                                         return fallback_price
                                 except (ValueError, TypeError):
@@ -1544,8 +1514,10 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
                 except Exception as e:
                     logger.debug(f"Failed to get price from Exa: {e}")
             
-            # Normalize unknown/invalid prices to None.
-            price = self._normalize_price_value(price)
+            # For Wegmans: If price extraction failed due to JavaScript limitations, set "check store"
+            if is_wegmans and not price:
+                price = "check store"
+                logger.debug(f"⚠️ Wegmans price extraction failed (likely JavaScript limitation) - setting to 'check store'")
 
             # Extract brand from title or text
             brand = None
@@ -1855,8 +1827,10 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
                 "source": "exa_structured"
             }
             
-            # Ensure unknown/invalid prices are consistently null in API responses.
-            product["price"] = self._normalize_price_value(product.get("price"))
+            # Convert $0 prices to "check store" (invalid price)
+            if price is not None and isinstance(price, (int, float)) and price == 0:
+                product["price"] = "check store"
+                logger.debug(f"⚠️ Converted $0 price to 'check store' for {title[:50]}")
             
             # Try to extract price per unit and variants from text if available
             if text:
@@ -1947,8 +1921,14 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
                 "source": "exa_structured_summary"
             }
             
-            # Normalize unknown/invalid prices to None and preserve legitimate values (including 1.23).
-            product["price"] = self._normalize_price_value(product.get("price"))
+            # Validate price is reasonable
+            if product.get("price") is not None:
+                try:
+                    price_val = float(product["price"])
+                    if price_val <= 0 or price_val > 1000:
+                        product["price"] = None
+                except (ValueError, TypeError):
+                    product["price"] = None
             
             # Only return if we have at least a name and URL
             if product.get("name") and product.get("product_url"):
@@ -2120,7 +2100,7 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
                         "image_links": 1  # Also extract image URL
                     },
                     summary={
-                        "query": "Extract comprehensive grocery product details from the product page. Focus on: complete product name and brand, exact price, detailed quantity/size, full description, ingredients list, nutritional facts, allergens, customer ratings and review counts, availability status. If exact price is not present or not reliable, return null for price. Ensure all data is current and accurate from the product page.",
+                        "query": "Extract comprehensive grocery product details from the product page. Focus on: complete product name and brand, exact price, detailed quantity/size, full description, ingredients list, nutritional facts, allergens, customer ratings and review counts, availability status. Ensure all data is current and accurate from the product page.",
                         "schema": detail_schema
                     }
                 )

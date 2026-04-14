@@ -30,65 +30,6 @@ class StoreProductExtractor:
             return float(price_text)
         except (ValueError, TypeError):
             return None
-
-    def _normalize_price_value(self, raw_price: Any) -> Optional[float]:
-        """Normalize mixed price inputs to float or None."""
-        if raw_price is None or isinstance(raw_price, bool):
-            return None
-
-        cleaned: Any = raw_price
-        if isinstance(raw_price, str):
-            cleaned = raw_price.strip()
-            if not cleaned:
-                return None
-            if cleaned.lower() in {"null", "none", "n/a", "na", "unknown", "check store"}:
-                return None
-
-        try:
-            value = float(cleaned)
-        except (ValueError, TypeError):
-            if isinstance(cleaned, str):
-                value = self._normalize_price(cleaned)
-                if value is None:
-                    return None
-            else:
-                return None
-
-        if not (0.01 <= value <= 1000):
-            return None
-
-        return value
-
-    def _normalize_price_display(self, raw_display: Any) -> Optional[str]:
-        """Normalize textual display price values."""
-        if raw_display is None:
-            return None
-        if isinstance(raw_display, bool):
-            return None
-        if isinstance(raw_display, (int, float)):
-            return f"${float(raw_display):.2f}"
-        if not isinstance(raw_display, str):
-            return None
-
-        display = raw_display.strip()
-        if not display:
-            return None
-        if display.lower() in {"null", "none", "n/a", "na", "unknown", "check store"}:
-            return None
-        return display
-
-    def _finalize_product(self, product: Dict[str, Any]) -> Dict[str, Any]:
-        """Apply shared cross-store output normalization."""
-        normalized_price = self._normalize_price_value(product.get("price"))
-        product["price"] = normalized_price
-
-        normalized_display = self._normalize_price_display(product.get("price_display"))
-        if normalized_display is None and normalized_price is not None:
-            product["price_display"] = f"${normalized_price:.2f}"
-        else:
-            product["price_display"] = normalized_display
-
-        return product
     
     def _normalize_price_per_unit(self, unit_text: str) -> Optional[str]:
         """Normalize price per unit text"""
@@ -297,9 +238,9 @@ class KrogerExtractor(StoreProductExtractor):
             if brand:
                 product['name'] = cleaned_name
         
-        # Only return if we have at least name.
-        if product['name']:
-            return self._finalize_product(product)
+        # Only return if we have at least name and price
+        if product['name'] and product['price']:
+            return product
         
         return None
 
@@ -446,9 +387,9 @@ class WalmartExtractor(StoreProductExtractor):
             if size_match:
                 product['size'] = size_match.group(1)
         
-        # Only return if we have at least name.
-        if product['name']:
-            return self._finalize_product(product)
+        # Only return if we have at least name and price
+        if product['name'] and product['price']:
+            return product
         
         return None
 
@@ -569,9 +510,9 @@ class TargetExtractor(StoreProductExtractor):
             if brand:
                 product['name'] = cleaned_name
         
-        # Only return if we have at least name.
-        if product['name']:
-            return self._finalize_product(product)
+        # Only return if we have at least name and price
+        if product['name'] and product['price']:
+            return product
         
         return None
 
@@ -656,9 +597,9 @@ class WholeFoodsExtractor(StoreProductExtractor):
             if brand:
                 product['name'] = cleaned_name
         
-        # Only return if we have at least name.
-        if product['name']:
-            return self._finalize_product(product)
+        # Only return if we have at least name and price
+        if product['name'] and product['price']:
+            return product
         
         return None
 
@@ -842,7 +783,7 @@ class WegmansExtractor(StoreProductExtractor):
                 
                 price = self._normalize_price(price_str)
                 
-                if name:
+                if name and price:
                     # Generate a product URL that won't be filtered as a category page
                     # Use /shop/product/ format with a slug based on product name
                     name_slug = re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
@@ -895,8 +836,7 @@ class WegmansExtractor(StoreProductExtractor):
                     product['brand'] = brand
                     if brand:
                         product['name'] = cleaned_name
-
-                    product = self._finalize_product(product)
+                    
                     if self._is_valid_individual_product(product):
                         products.append(product)
             except Exception as e:
@@ -987,9 +927,9 @@ class WegmansExtractor(StoreProductExtractor):
             if brand:
                 product['name'] = cleaned_name
         
-        # Return only if we have a name.
-        if product['name']:
-            return self._finalize_product(product)
+        # Return only if we have name and price
+        if product['name'] and product['price']:
+            return product
         
         return None
     
@@ -1166,9 +1106,15 @@ class WegmansExtractor(StoreProductExtractor):
             if brand:
                 product['name'] = cleaned_name
         
+        # For Wegmans: If price extraction failed due to JavaScript limitations, set "check store"
+        if not product['price']:
+            product['price'] = "check store"
+            product['price_display'] = "check store"
+            logger.debug(f"⚠️ Wegmans price extraction failed (likely JavaScript limitation) - setting to 'check store'")
+        
         # Only return if we have at least name
         if product['name']:
-            return self._finalize_product(product)
+            return product
         
         return None
     
@@ -1193,6 +1139,12 @@ class WegmansExtractor(StoreProductExtractor):
                 product['price'] = float(price) if isinstance(price, (int, float)) else self._normalize_price(str(price))
                 product['price_display'] = f"${product['price']:.2f}" if product['price'] else None
         
+        # For Wegmans: If price extraction failed due to JavaScript limitations, set "check store"
+        if not product['price']:
+            product['price'] = "check store"
+            product['price_display'] = "check store"
+            logger.debug(f"⚠️ Wegmans price extraction failed (likely JavaScript limitation) - setting to 'check store'")
+        
         # Extract image
         image = item.get('image')
         if image:
@@ -1203,9 +1155,7 @@ class WegmansExtractor(StoreProductExtractor):
             if isinstance(image, str) and 'wegmans-og-share-img' not in image.lower() and '53100' not in image:
                 product['image_url'] = image
         
-        if product['name']:
-            return self._finalize_product(product)
-        return None
+        return product if product['name'] else None
     
     def _extract_from_dict(self, data: Dict[str, Any], store_id: str) -> Optional[Dict[str, Any]]:
         """Extract product from dictionary data"""
@@ -1213,16 +1163,20 @@ class WegmansExtractor(StoreProductExtractor):
             'store_id': store_id,
             'store_name': 'Wegmans',
             'name': data.get('name') or data.get('title'),
-            'price': data.get('price'),
-            'price_display': data.get('price_display'),
+            'price': self._normalize_price(data.get('price')) if data.get('price') else None,
+            'price_display': data.get('price_display') or (f"${data.get('price'):.2f}" if data.get('price') else None),
             'image_url': data.get('image') or data.get('image_url'),
             'product_url': data.get('url') or data.get('product_url'),
             'availability': 'Check Store'
         }
-
-        if product['name']:
-            return self._finalize_product(product)
-        return None
+        
+        # For Wegmans: If price extraction failed due to JavaScript limitations, set "check store"
+        if not product['price']:
+            product['price'] = "check store"
+            product['price_display'] = "check store"
+            logger.debug(f"⚠️ Wegmans price extraction failed (likely JavaScript limitation) - setting to 'check store'")
+        
+        return product if product['name'] else None
 
 
 class SafewayExtractor(StoreProductExtractor):
@@ -1305,9 +1259,9 @@ class SafewayExtractor(StoreProductExtractor):
             if brand:
                 product['name'] = cleaned_name
         
-        # Only return if we have at least name.
-        if product['name']:
-            return self._finalize_product(product)
+        # Only return if we have at least name and price
+        if product['name'] and product['price']:
+            return product
         
         return None
 
@@ -1514,7 +1468,7 @@ class CostcoExtractor(StoreProductExtractor):
         # Only return if we have at least name
         # Price may be missing for "Members Only" products
         if product['name']:
-            return self._finalize_product(product)
+            return product
         
         return None
 
@@ -1535,3 +1489,4 @@ def get_extractor(store_id: str) -> StoreProductExtractor:
     }
     
     return extractors.get(store_id.lower(), StoreProductExtractor())
+
