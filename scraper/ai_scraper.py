@@ -14,6 +14,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from dotenv import load_dotenv
 from datetime import datetime
 from bs4 import BeautifulSoup
+from urllib.parse import urlparse
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -476,6 +477,46 @@ Critical Instructions:
                 except:
                     pass
         return None
+
+    def _validate_image_url(self, image_url: Any) -> Optional[str]:
+        """
+        Validate and clean a candidate image URL from model output.
+        Returns a usable HTTP(S) URL or None.
+        """
+        if not isinstance(image_url, str):
+            return None
+
+        cleaned = image_url.strip().strip('"').strip("'").rstrip(".,;)")
+        if not cleaned:
+            return None
+        if not cleaned.startswith(("http://", "https://")):
+            return None
+
+        try:
+            parsed = urlparse(cleaned)
+        except Exception:
+            return None
+
+        if not parsed.netloc:
+            return None
+
+        lower = cleaned.lower()
+        blocked_patterns = [
+            "logo",
+            "icon",
+            "favicon",
+            "sprite",
+            "placeholder",
+            "blank",
+            "pixel",
+            "avatar",
+            "social",
+            "wegmans-og-share-img",
+        ]
+        if any(pattern in lower for pattern in blocked_patterns):
+            return None
+
+        return cleaned
     
     def _parse_float(self, value: Any) -> Optional[float]:
         """Parse float value"""
@@ -640,4 +681,3 @@ Return ONLY the description text, no JSON, no markdown, just the description."""
         """Check if AI scraper is available"""
         # Only need LLM API key - no browser needed!
         return bool(self.use_openai or self.use_anthropic)
-

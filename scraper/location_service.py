@@ -362,7 +362,7 @@ class LocationService:
                 "location": f"{lat},{lng}",
                 "radius": radius_meters,
                 "keyword": search_term,
-                "type": "supermarket",
+                "type": "store",
                 "key": self.google_api_key
             }
             
