@@ -40,6 +40,8 @@ def _make_client_with_summary(summary_payload):
     ("summary_payload", "expected"),
     [
         ({"price": 1.23, "confidence": "low"}, None),
+        ({"price": 4.99, "confidence": "Low"}, None),
+        ({"price": 4.99, "confidence": " LOW "}, None),
         ({"price": 4.99, "confidence": "low"}, None),
         ({"price": 4.99, "confidence": "medium"}, 4.99),
     ],
@@ -47,6 +49,20 @@ def _make_client_with_summary(summary_payload):
 def test_get_price_from_exa_respects_confidence(summary_payload, expected):
     client = _make_client_with_summary(summary_payload)
     price = asyncio.run(client._get_price_from_exa("https://www.target.com/p/item"))
+    assert price == expected
+
+
+@pytest.mark.parametrize(
+    ("summary_payload", "expected"),
+    [
+        ({"price": 3.49, "confidence": "medium"}, 3.49),
+        ({"price": 3.49, "confidence": "low"}, None),
+        ({"price": 3.49, "confidence": "high"}, 3.49),
+    ],
+)
+def test_get_price_from_exa_applies_same_confidence_rules_for_wegmans(summary_payload, expected):
+    client = _make_client_with_summary(summary_payload)
+    price = asyncio.run(client._get_price_from_exa("https://www.wegmans.com/shop/product/59715-Hi-Pro-Ultra-Filtered-Fat-Free-Milk"))
     assert price == expected
 
 

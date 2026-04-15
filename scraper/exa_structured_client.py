@@ -387,7 +387,7 @@ class ExaStructuredClient:
                         "description": "Confidence in data accuracy (0-1)"
                     }
                 },
-                "required": ["product_name", "price"]
+                "required": ["product_name"]
             }
             
             logger.info(f"🔍 Searching Exa for: {search_query} (Category: {category}, Context: {context or 'auto-detected'})")
@@ -405,7 +405,7 @@ class ExaStructuredClient:
                 "type": "auto",  # Exa 2.0: Auto balances speed and comprehensiveness
                 "text": {"max_characters": 1500},  # Reduced from 3000 to 1500 for faster processing
                 "summary": {
-                    "query": f"Extract grocery product information from this {store_name or 'grocery store'} product page. Focus on product name, brand, price, quantity/size, and availability.",
+                    "query": f"Extract grocery product information from this {store_name or 'grocery store'} product page. Focus on product name, brand, price, quantity/size, and availability. If exact price is missing or unreliable, omit price or return null.",
                     "schema": product_schema
                 }
                 # Note: extras/image_links is only available in get_contents, not search_and_contents
@@ -521,6 +521,70 @@ class ExaStructuredClient:
             return True
 
         return False
+
+    def _host_matches_domain(self, host: str, domain: str) -> bool:
+        """Return True when host is exactly domain or a subdomain of domain."""
+        if not host or not domain:
+            return False
+        clean_host = host.lower().rstrip(".")
+        clean_domain = domain.lower().lstrip(".").rstrip(".")
+        return clean_host == clean_domain or clean_host.endswith(f".{clean_domain}")
+
+    def _url_matches_domain(self, url: Optional[str], domain: str) -> bool:
+        """Return True when URL hostname matches domain exactly or as subdomain."""
+        if not url:
+            return False
+        try:
+            host = urlparse(url).hostname or ""
+        except Exception:
+            return False
+        return self._host_matches_domain(host, domain)
+
+    def _sanitize_wegmans_product_url(self, url: Optional[str]) -> Optional[str]:
+        """
+        Keep only known-good Wegmans catalog product URLs.
+        Returns sanitized URL, or None when URL is a non-catalog/broken Wegmans shape.
+        """
+        if not url:
+            return None
+
+        try:
+            parsed = urlparse(url)
+            host = (parsed.hostname or "").lower().rstrip(".")
+            path = (parsed.path or "").lower()
+        except Exception:
+            return None
+
+        if not self._host_matches_domain(host, "wegmans.com"):
+            return url
+
+        # Known broken/non-catalog host for returned product links.
+        if self._host_matches_domain(host, "order.wegmans.com"):
+            return None
+
+        # Known non-product Wegmans sections.
+        excluded_path_fragments = [
+            "/stores/",
+            "/shop/categories/",
+            "/service/",
+            "/sitemap",
+            "/about",
+            "/privacy",
+            "/terms",
+            "/recipes",
+            "/pharmacy",
+        ]
+        if any(fragment in path for fragment in excluded_path_fragments):
+            return None
+
+        # Safe product URL shapes.
+        is_www_product = host in {"www.wegmans.com", "wegmans.com"} and path.startswith("/shop/product/")
+        is_shop_product = host == "shop.wegmans.com" and path.startswith("/product/")
+        if is_www_product or is_shop_product:
+            return url
+
+        # Any other Wegmans URL shape is treated as non-catalog for Phase 1.
+        return None
     
     def _is_product_page(self, url: str, title: str) -> bool:
         """Check if URL is an actual product page, not a category/search page"""
@@ -563,26 +627,9 @@ class ExaStructuredClient:
                 logger.debug(f"Filtering out gift card: {title[:60]}... (URL: {url[:60]}...)")
                 return False
 
-        # Wegmans-specific filtering - allow product pages and search pages
-        if 'wegmans.com' in url_lower:
-            # Wegmans product pages are at /shop/product/{id}-{name}
-            # Also allow search pages at /shop/search/ for more results
-            if '/shop/product/' in url_lower or '/shop/search' in url_lower:
-                # Exclude store location pages, sitemaps, FAQs, etc.
-                exclude_wegmans = [
-                    '/stores/',
-                    '/sitemap',
-                    '/service/',
-                    '/faq',
-                    '/about',
-                    '/privacy',
-                    '/terms',
-                    '/recipes',
-                    '/pharmacy',
-                ]
-                if not any(exclude in url_lower for exclude in exclude_wegmans):
-                    return True
-            return False
+        # Wegmans-specific filtering - only allow safe catalog product URLs.
+        if self._url_matches_domain(url, "wegmans.com"):
+            return self._sanitize_wegmans_product_url(url) is not None
         
         # ALDI-specific filtering - only include actual product pages
         if 'aldi.us' in url_lower:
@@ -688,11 +735,7 @@ class ExaStructuredClient:
 
             if not self._is_product_page(url, title):
                 logger.debug(f"Skipping non-product page: {title[:60]}... (URL: {url[:60]}...)")
-                # For Wegmans, allow search pages since products are in modals
-                if 'wegmans.com' in url.lower() and '/shop/search' in url.lower():
-                    logger.debug(f"✅ Allowing Wegmans search page (products extracted from search results): {url[:60]}...")
-                    # Don't filter out - continue processing
-                elif 'wegmans.com' in url.lower():
+                if self._url_matches_domain(url, "wegmans.com"):
                     logger.debug(f"Filtering out Wegmans non-product URL: {url[:60]}...")
                     return None
                 # For ALDI, be strict - only allow /product/ URLs (not /products/)
@@ -749,6 +792,15 @@ class ExaStructuredClient:
                 if any(indicator in product_name for indicator in category_page_indicators):
                     logger.debug(f"Filtering out category page: {product.get('name', 'Unknown')[:50]}...")
                     return None
+
+                # Phase 1 Wegmans link safety: keep only clickable catalog product URLs.
+                raw_product_url = product.get("product_url")
+                if self._url_matches_domain(raw_product_url, "wegmans.com"):
+                    safe_url = self._sanitize_wegmans_product_url(raw_product_url)
+                    if not safe_url:
+                        logger.debug(f"Filtering out non-catalog Wegmans URL: {raw_product_url[:100]}...")
+                        return None
+                    product["product_url"] = safe_url
             
             # SMART IMAGE CACHING: Check cache first, then Exa if needed
             if product and not product.get("image_url"):
@@ -1086,7 +1138,7 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
                     try:
                         summary_data = json.loads(result.summary)
                         exa_price = summary_data.get("price")
-                        confidence = summary_data.get("confidence", "medium")
+                        confidence = str(summary_data.get("confidence", "medium") or "medium").strip().lower()
                         
                         if exa_price is not None:
                             try:
@@ -1856,8 +1908,12 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
         """Detect store ID from URL"""
         if not url:
             return None
-        
-        url_lower = url.lower()
+
+        try:
+            host = (urlparse(url).hostname or "").lower().rstrip(".")
+        except Exception:
+            return None
+
         store_mappings = {
             'target.com': 'target',
             'walmart.com': 'walmart',
@@ -1873,11 +1929,11 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
             'heb.com': 'heb',
             'wegmans.com': 'wegmans',
         }
-        
+
         for domain, store_id in store_mappings.items():
-            if domain in url_lower:
+            if self._host_matches_domain(host, domain):
                 return store_id
-        
+
         return None
     
     def _convert_summary_to_product(
@@ -1921,14 +1977,27 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
                 "source": "exa_structured_summary"
             }
             
-            # Validate price is reasonable
-            if product.get("price") is not None:
-                try:
-                    price_val = float(product["price"])
-                    if price_val <= 0 or price_val > 1000:
+            # Confidence gate for summary-derived price.
+            # If confidence_score is missing or too low, return null for price.
+            confidence_score = summary_data.get("confidence_score")
+            try:
+                confidence_value = float(confidence_score)
+            except (ValueError, TypeError):
+                confidence_value = None
+
+            if confidence_value is None or confidence_value < 0.80:
+                product["price"] = None
+            else:
+                # Keep price only when numeric and in a reasonable range.
+                if product.get("price") is not None:
+                    try:
+                        price_val = float(product["price"])
+                        if 0.01 <= price_val <= 1000:
+                            product["price"] = price_val
+                        else:
+                            product["price"] = None
+                    except (ValueError, TypeError):
                         product["price"] = None
-                except (ValueError, TypeError):
-                    product["price"] = None
             
             # Only return if we have at least a name and URL
             if product.get("name") and product.get("product_url"):
