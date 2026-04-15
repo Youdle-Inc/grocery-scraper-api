@@ -23,6 +23,13 @@ def test_non_local_store_is_excluded_for_chicago_zip():
     assert asyncio.run(service.resolve_store_ids_by_location(["wegmans"], "60616")) == []
 
 
+def test_kroger_is_not_treated_as_nationwide_by_static_location_filter():
+    service = LocationService(google_api_key="")
+
+    # Static filtering should not auto-include Kroger in every ZIP.
+    assert service.is_store_available_in_zipcode("kroger", "10001") is False
+
+
 def test_marianos_is_included_for_chicago_zip():
     service = LocationService(google_api_key="")
 

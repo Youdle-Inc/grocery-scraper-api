@@ -32,6 +32,23 @@ class FakePartnerAPIClient:
         return []
 
 
+class ConfigurablePartnerAPIClient:
+    def __init__(self, stores_with_api=None, products_by_store=None, errors_by_store=None):
+        self.stores_with_api = set(stores_with_api or [])
+        self.products_by_store = products_by_store or {}
+        self.errors_by_store = errors_by_store or {}
+        self.calls = []
+
+    def has_partner_api(self, store_id: str) -> bool:
+        return store_id in self.stores_with_api
+
+    async def search_products(self, store_id: str, query: str, zipcode: str, limit: int):
+        self.calls.append({"store_id": store_id, "query": query, "zipcode": zipcode, "limit": limit})
+        if store_id in self.errors_by_store:
+            raise RuntimeError(self.errors_by_store[store_id])
+        return self.products_by_store.get(store_id, [])
+
+
 class FakeLocationService:
     def __init__(self, allowed_store_ids=None):
         self.allowed_store_ids = allowed_store_ids
@@ -52,12 +69,21 @@ class FakeLocationService:
 class FakeExaClient:
     def __init__(self, behavior_by_store_id):
         self.behavior_by_store_id = behavior_by_store_id
+        self.search_calls = []
 
     def is_available(self):
         return True
 
     async def search_products_structured(self, query, store_name, zipcode, num_results, include_location=False, context=None):
         store_id = main._normalize_store_id(store_name)
+        self.search_calls.append(
+            {
+                "store_id": store_id,
+                "query": query,
+                "zipcode": zipcode,
+                "num_results": num_results,
+            }
+        )
         behavior = self.behavior_by_store_id.get(store_id, {})
 
         delay = behavior.get("delay", 0)
@@ -358,6 +384,48 @@ def test_stream_sanitizes_unexpected_errors(monkeypatch):
     assert len(target_errors) == 1
     assert target_errors[0]["error"] == main._STREAM_GENERIC_STORE_ERROR_MESSAGE
     assert "secret token leaked" not in target_errors[0]["error"]
+
+
+def test_stream_does_not_fallback_to_exa_when_partner_returns_no_results(monkeypatch):
+    partner = ConfigurablePartnerAPIClient(stores_with_api={"target"}, products_by_store={"target": []})
+    exa = FakeExaClient({"target": {"products": [_make_product("target")]}})
+    monkeypatch.setattr(main, "partner_api_client", partner)
+    monkeypatch.setattr(main, "location_service", FakeLocationService())
+    monkeypatch.setattr(main, "exa_client", exa)
+
+    events = asyncio.run(
+        _collect_stream_events(
+            "/products/aggregate/stream?query=milk&zipcode=38125&stores=target&store_timeout_s=5&overall_timeout_s=10",
+        )
+    )
+
+    store_events = [e for e in events if e["type"] == "store_products" and e["store_id"] == "target"]
+    assert len(store_events) == 1
+    assert store_events[0]["count"] == 0
+    assert store_events[0]["products"] == []
+    assert exa.search_calls == []
+
+
+def test_stream_partner_error_emits_error_without_exa_fallback(monkeypatch):
+    partner = ConfigurablePartnerAPIClient(
+        stores_with_api={"target"},
+        errors_by_store={"target": "partner exploded"},
+    )
+    exa = FakeExaClient({"target": {"products": [_make_product("target")]}})
+    monkeypatch.setattr(main, "partner_api_client", partner)
+    monkeypatch.setattr(main, "location_service", FakeLocationService())
+    monkeypatch.setattr(main, "exa_client", exa)
+
+    events = asyncio.run(
+        _collect_stream_events(
+            "/products/aggregate/stream?query=milk&zipcode=38125&stores=target&store_timeout_s=5&overall_timeout_s=10",
+        )
+    )
+
+    target_errors = [e for e in events if e["type"] == "error" and e["store"] == "Target"]
+    assert len(target_errors) == 1
+    assert target_errors[0]["error"] == main._STREAM_GENERIC_STORE_ERROR_MESSAGE
+    assert exa.search_calls == []
 
 
 def test_stream_limits_inflight_store_searches_to_five(monkeypatch):

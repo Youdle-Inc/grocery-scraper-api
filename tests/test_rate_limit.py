@@ -22,20 +22,45 @@ class FakePartnerAPIClient:
         return []
 
 
+class ConfigurablePartnerAPIClient:
+    def __init__(self, stores_with_api=None, products_by_store=None, errors_by_store=None):
+        self.stores_with_api = set(stores_with_api or [])
+        self.products_by_store = products_by_store or {}
+        self.errors_by_store = errors_by_store or {}
+        self.calls = []
+
+    def has_partner_api(self, store_id: str) -> bool:
+        return store_id in self.stores_with_api
+
+    async def search_products(self, store_id: str, query: str, zipcode: str, limit: int):
+        self.calls.append({"store_id": store_id, "query": query, "zipcode": zipcode, "limit": limit})
+        if store_id in self.errors_by_store:
+            raise RuntimeError(self.errors_by_store[store_id])
+        return self.products_by_store.get(store_id, [])
+
+
 class FakeLocationService:
+    def __init__(self, allowed_store_ids=None):
+        self.allowed_store_ids = allowed_store_ids
+
     def _normalize(self, store_id: str) -> str:
         return main._normalize_store_id(store_id)
 
     def filter_stores_by_location(self, store_ids, zipcode):
-        return [self._normalize(store_id) for store_id in store_ids]
+        normalized = [self._normalize(store_id) for store_id in store_ids]
+        if self.allowed_store_ids is None:
+            return normalized
+        allowed = {self._normalize(store_id) for store_id in self.allowed_store_ids}
+        return [store_id for store_id in normalized if store_id in allowed]
 
     async def resolve_store_ids_by_location(self, store_ids, zipcode):
-        return [self._normalize(store_id) for store_id in store_ids]
+        return self.filter_stores_by_location(store_ids, zipcode)
 
 
 class FakeExaClient:
     def __init__(self, delay: float = 0.0):
         self.delay = delay
+        self.search_calls = []
 
     def is_available(self):
         return True
@@ -49,6 +74,14 @@ class FakeExaClient:
         include_location=False,
         context=None,
     ):
+        self.search_calls.append(
+            {
+                "query": query,
+                "store_name": store_name,
+                "zipcode": zipcode,
+                "num_results": num_results,
+            }
+        )
         if self.delay:
             await asyncio.sleep(self.delay)
 
@@ -290,6 +323,109 @@ def test_search_products_blocks_store_not_near_zipcode(monkeypatch):
     payload = response.json()
     assert payload["products_found"] == 0
     assert payload["source"] == "location_filtered"
+
+
+def test_search_products_partner_empty_does_not_fallback_to_exa(monkeypatch):
+    partner = ConfigurablePartnerAPIClient(stores_with_api={"target"}, products_by_store={"target": []})
+    exa = FakeExaClient()
+    monkeypatch.setattr(main, "partner_api_client", partner)
+    monkeypatch.setattr(main, "location_service", FakeLocationService())
+    monkeypatch.setattr(main, "exa_client", exa)
+
+    transport = httpx.ASGITransport(app=main.app)
+
+    async def run():
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get(
+                "/products/search?query=partner-empty-test&store_name=Target&zipcode=60601&refresh=true"
+            )
+            return response
+
+    response = asyncio.run(run())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["products"] == []
+    assert payload["products_found"] == 0
+    assert payload["source"] == "partner_api"
+    assert len(exa.search_calls) == 0
+
+
+def test_search_products_partner_error_does_not_fallback_to_exa(monkeypatch):
+    partner = ConfigurablePartnerAPIClient(
+        stores_with_api={"target"},
+        errors_by_store={"target": "partner timeout"},
+    )
+    exa = FakeExaClient()
+    monkeypatch.setattr(main, "partner_api_client", partner)
+    monkeypatch.setattr(main, "location_service", FakeLocationService())
+    monkeypatch.setattr(main, "exa_client", exa)
+
+    transport = httpx.ASGITransport(app=main.app)
+
+    async def run():
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get(
+                "/products/search?query=partner-error-test&store_name=Target&zipcode=60601&refresh=true"
+            )
+            return response
+
+    response = asyncio.run(run())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["products"] == []
+    assert payload["products_found"] == 0
+    assert payload["source"] == "partner_api"
+    assert len(exa.search_calls) == 0
+
+
+def test_search_products_non_partner_store_still_uses_exa(monkeypatch):
+    partner = ConfigurablePartnerAPIClient(stores_with_api={"target"})
+    exa = FakeExaClient()
+    monkeypatch.setattr(main, "partner_api_client", partner)
+    monkeypatch.setattr(main, "location_service", FakeLocationService())
+    monkeypatch.setattr(main, "exa_client", exa)
+
+    transport = httpx.ASGITransport(app=main.app)
+
+    async def run():
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get(
+                "/products/search?query=non-partner-fallback-test&store_name=H-E-B&zipcode=60601&refresh=true"
+            )
+            return response
+
+    response = asyncio.run(run())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["products_found"] == 1
+    assert payload["source"] == "exa_structured"
+    assert len(exa.search_calls) == 1
+    assert exa.search_calls[0]["store_name"] == "H-E-B"
+
+
+def test_stores_endpoint_uses_location_service_and_excludes_unavailable_chain(monkeypatch):
+    monkeypatch.setattr(main, "location_service", FakeLocationService(allowed_store_ids=["target", "walmart"]))
+    monkeypatch.setattr(main, "exa_client", FakeExaClient())
+
+    transport = httpx.ASGITransport(app=main.app)
+
+    async def run():
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get("/stores/10001")
+            return response
+
+    response = asyncio.run(run())
+
+    assert response.status_code == 200
+    payload = response.json()
+    store_ids = [store["store_id"] for store in payload["stores"]]
+    assert "target" in store_ids
+    assert "walmart" in store_ids
+    assert "kroger" not in store_ids
+    assert payload["source"] == "location_service"
 
 
 def test_search_stream_cancels_inflight_tasks_when_client_disconnects(monkeypatch):

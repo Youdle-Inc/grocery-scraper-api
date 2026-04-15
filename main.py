@@ -362,50 +362,58 @@ async def get_stores_in_zipcode(
             raise HTTPException(status_code=400, detail="Invalid zipcode format. Use 5-digit ZIP code.")
         
         # Try cache first
-        cache_key = f"stores:{zipcode}:{store_chain or 'all'}"
+        cache_key = f"stores:v2:{zipcode}:{store_chain or 'all'}"
         cached = await cache.get_json(cache_key) if cache else None
         if cached:
             logger.info(f"cache_hit stores zip={zipcode}")
             return {**cached, "cache": {"hit": True}}
 
-        if not exa_client or not exa_client.is_available():
-            raise HTTPException(
-                status_code=503,
-                detail="Exa client not available - check API key configuration"
-            )
-        
-        # Get stores for specific chain or major chains
-        all_stores = []
-        chains_to_search = [store_chain] if store_chain else [
-            "Target", "Walmart", "Whole Foods", "Kroger", "Safeway", "ALDI"
-        ]
-        
-        for chain in chains_to_search:
-            stores = await exa_client.search_stores_in_zipcode(chain, zipcode)
-            all_stores.extend(stores)
-        
+        requested_store_ids = (
+            [_normalize_store_id(store_chain)]
+            if store_chain
+            else [
+                "target",
+                "walmart",
+                "whole_foods",
+                "kroger",
+                "marianos",
+                "safeway",
+                "aldi",
+                "costco",
+                "trader_joes",
+                "sams_club",
+            ]
+        )
+        requested_store_ids = _dedupe_store_ids(requested_store_ids)
+
+        if location_service:
+            available_store_ids = await _resolve_store_ids_by_location(requested_store_ids, zipcode)
+        else:
+            logger.warning("LocationService not available, returning requested stores without location filtering")
+            available_store_ids = requested_store_ids
+
         response_payload = {
             "zipcode": zipcode,
-            "stores_found": len(all_stores),
+            "stores_found": len(available_store_ids),
             "search_timestamp": datetime.now().isoformat(),
             "stores": [
                 {
-                    "store_id": store["store_id"],
-                    "store_name": store["store_name"],
-                    "address": store.get("address"),
-                    "services": store.get("services", ["in-store"]),
-                    "status": store.get("status", "active"),
-                    "zipcode": store.get("zipcode", zipcode),
+                    "store_id": store_id,
+                    "store_name": _to_store_name(store_id),
+                    "address": None,
+                    "services": ["in-store"],
+                    "status": "active",
+                    "zipcode": zipcode,
                     "website": None,
                     "location": {
-                        "zipcode": store.get("zipcode", zipcode),
-                        "city": store.get("city"),
-                        "state": store.get("state")
+                        "zipcode": zipcode,
+                        "city": None,
+                        "state": None
                     }
                 }
-                for store in all_stores
+                for store_id in available_store_ids
             ],
-            "source": "exa_structured",
+            "source": "location_service",
             "api_version": "2.0.0"
         }
         
@@ -515,6 +523,7 @@ async def search_products(
             return {**cached, "cache": {"hit": True}}
         
         products = []
+        partner_api_selected = False
         
         # Try partner API first if store_name is specified and we have API keys
         if store_name:
@@ -556,6 +565,7 @@ async def search_products(
                     }
             
             if partner_api_client and partner_api_client.has_partner_api(store_id):
+                partner_api_selected = True
                 logger.info(f"🎯 Using official {store_name} API for '{query}'")
                 try:
                     products = await partner_api_client.search_products(
@@ -567,12 +577,13 @@ async def search_products(
                     if products:
                         logger.info(f"✅ {store_name} partner API returned {len(products)} products")
                     else:
-                        logger.info(f"⚠️ {store_name} partner API returned no results, falling back to Exa")
+                        logger.info(f"⚠️ {store_name} partner API returned no results (no Exa fallback)")
                 except Exception as e:
-                    logger.warning(f"Partner API error for {store_name}: {e}, falling back to Exa")
-        
-        # Fallback to Exa if no partner API or partner API returned no results
-        if not products:
+                    products = []
+                    logger.warning(f"Partner API error for {store_name}: {e} (no Exa fallback)")
+
+        # Fallback to Exa only when a partner API was not selected.
+        if not products and not partner_api_selected:
             if not exa_client or not exa_client.is_available():
                 raise HTTPException(
                     status_code=503,
@@ -624,19 +635,7 @@ async def search_products(
                 logger.warning(f"Price verification failed: {e}")
         
         # Determine source for response
-        source = "exa_structured"
-        if store_name and products:
-            store_id_normalized = store_name.lower().replace(" ", "_").replace("-", "_")
-            store_id_map = {
-                "target": "target",
-                "walmart": "walmart",
-                "kroger": "kroger",
-                "whole_foods": "whole_foods",
-                "whole foods": "whole_foods",
-            }
-            store_id_normalized = store_id_map.get(store_id_normalized, store_id_normalized)
-            if partner_api_client and partner_api_client.has_partner_api(store_id_normalized):
-                source = "partner_api"
+        source = "partner_api" if partner_api_selected else "exa_structured"
         
         response_payload = {
             "query": query,
@@ -1064,8 +1063,9 @@ async def _fetch_store_products_for_stream(
 ) -> List[Dict[str, Any]]:
     store_name = _to_store_name(store_id)
     products: List[Dict[str, Any]] = []
+    partner_api_selected = bool(partner_api_client and partner_api_client.has_partner_api(store_id))
 
-    if partner_api_client and partner_api_client.has_partner_api(store_id):
+    if partner_api_selected:
         logger.info(f"🎯 Streaming aggregate from {store_name} partner API")
         products = await partner_api_client.search_products(
             store_id=store_id,
@@ -1073,8 +1073,12 @@ async def _fetch_store_products_for_stream(
             zipcode=zipcode,
             limit=limit,
         )
+        if products:
+            logger.info(f"✅ Streaming aggregate {store_name} partner API returned {len(products)} products")
+        else:
+            logger.info(f"⚠️ Streaming aggregate {store_name} partner API returned no results (no Exa fallback)")
 
-    if not products and exa_client and exa_client.is_available():
+    if not products and not partner_api_selected and exa_client and exa_client.is_available():
         logger.info(f"🔍 Streaming aggregate from Exa for {store_name}")
         products = await exa_client.search_products_structured(
             query=query,

@@ -62,6 +62,7 @@ class LocationService:
         # Cache for Places API results: {(store_id, zipcode): (stores, timestamp)}
         self._places_cache: Dict[Tuple[str, str], Tuple[List[Dict], float]] = {}
         self._places_cache_ttl = 3600  # 1 hour cache TTL
+        self._kroger_client = None
         
         if self.google_api_key:
             logger.info("Google Places API initialized for store location detection")
@@ -211,7 +212,7 @@ class LocationService:
     def _get_nationwide_stores(self) -> Set[str]:
         """Get set of nationwide store IDs that are always available"""
         return {
-            "walmart", "target", "aldi", "kroger", "costco", 
+            "walmart", "target", "aldi", "costco",
             "whole_foods", "sams_club", "trader_joes", "safeway", "albertsons"
         }
     
@@ -362,7 +363,7 @@ class LocationService:
                 "location": f"{lat},{lng}",
                 "radius": radius_meters,
                 "keyword": search_term,
-                "type": "supermarket",
+                "type": "store",
                 "key": self.google_api_key
             }
             
@@ -469,6 +470,12 @@ class LocationService:
                 continue
             seen.add(normalized_id)
 
+            # Kroger is not modeled as nationwide; verify by official API when available.
+            if normalized_id == "kroger":
+                if await self._verify_kroger_in_zipcode(zipcode):
+                    resolved.append(normalized_id)
+                    continue
+
             if self.is_store_available_in_zipcode(normalized_id, zipcode):
                 resolved.append(normalized_id)
                 continue
@@ -481,6 +488,22 @@ class LocationService:
                     logger.warning(f"Error verifying {normalized_id} in {zipcode}: {e}")
 
         return resolved
+
+    async def _verify_kroger_in_zipcode(self, zipcode: str) -> bool:
+        """Verify Kroger availability via official Kroger locations API."""
+        try:
+            if self._kroger_client is None:
+                from .kroger_api_client import KrogerAPIClient
+                self._kroger_client = KrogerAPIClient()
+
+            if not self._kroger_client.is_available():
+                return False
+
+            stores = await self._kroger_client.get_stores(zipcode=zipcode, radius=10, limit=1)
+            return bool(stores)
+        except Exception as e:
+            logger.warning(f"Kroger location verification failed for {zipcode}: {e}")
+            return False
     
     async def get_verified_stores_for_zipcode(
         self,
