@@ -802,7 +802,10 @@ class ExaStructuredClient:
                         return None
                     product["product_url"] = safe_url
             
-            # SMART IMAGE CACHING: Check cache first, then Exa if needed
+            if product and product.get("image_url") and not product.get("_image_source"):
+                product["_image_source"] = "search_supplied"
+
+            # SMART IMAGE CACHING: Check cache first for missing images.
             if product and not product.get("image_url"):
                 # Try fuzzy matching cache first (FAST - DB lookup)
                 cached_image = None
@@ -816,37 +819,10 @@ class ExaStructuredClient:
                         )
                         if cached_image:
                             product["image_url"] = cached_image
+                            product["_image_source"] = "cache"
                             logger.debug(f"✅ Got image from cache for '{product.get('name', 'Unknown')[:50]}'")
                     except Exception as e:
                         logger.debug(f"Cache lookup failed: {e}")
-                
-                # If cache miss, try Exa extraction (SLOW - API call)
-                # For Wegmans, ALDI, and other stores that need better image extraction, always try Exa
-                product_url = product.get("product_url")
-                is_wegmans = product_url and "wegmans.com" in product_url.lower()
-                is_aldi = product_url and "aldi.us" in product_url.lower()
-                
-                if not product.get("image_url") and product_url:
-                    try:
-                        extracted_image = await self.get_product_image_url(product_url)
-                        if extracted_image:
-                            product["image_url"] = extracted_image
-                            # Cache it for future use
-                            if _image_cache:
-                                try:
-                                    await _image_cache.cache_image(
-                                        name=product.get("name", ""),
-                                        image_url=extracted_image,
-                                        brand=product.get("brand"),
-                                        size=product.get("size") or product.get("quantity"),
-                                        store=product.get("store_name"),
-                                        product_url=product_url
-                                    )
-                                except Exception as e:
-                                    logger.debug(f"Failed to cache image: {e}")
-                            logger.debug(f"✅ Got image from Exa for '{product.get('name', 'Unknown')[:50]}' ({'Wegmans' if is_wegmans else 'ALDI' if is_aldi else 'other'})")
-                    except Exception as e:
-                        logger.debug(f"Exa image extraction failed: {e}")
             
             if product:
                 if not self._is_result_relevant(query, title, url, product.get("name")):
@@ -1963,7 +1939,7 @@ Return the exact numeric price value in USD (e.g., 4.65 for $4.65, 12.50 for $12
                 "size": summary_data.get("quantity"),
                 "variants": None,
                 "availability": summary_data.get("availability") or "Check Store",
-                "image_url": None,  # Will be filled by image extraction
+                "image_url": getattr(result, "image", None),
                 "product_url": url,
                 "description": summary_data.get("description"),
                 "category": summary_data.get("category"),

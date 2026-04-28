@@ -48,9 +48,7 @@ from scraper.models import (
     ProductImage,
     NutritionInfo,
 )
-from scraper.image_scraper import ImageScraper
 from scraper.ai_scraper import AIScraper
-from scraper.html_image_extractor import HTMLImageExtractor
 from scraper.web_search_service import WebSearchService
 from scraper.geocoding_service import get_geocoding_service
 
@@ -87,6 +85,54 @@ def extract_state_from_address(address: str) -> Optional[str]:
         return match.group(2).strip()
     
     return None
+
+
+def _log_image_coverage(products: List[Dict[str, Any]], context: str) -> None:
+    """Log image coverage without mutating product metadata."""
+    search_supplied = 0
+    cached = 0
+    missing = 0
+
+    for product in products:
+        image_source = product.get("_image_source")
+        if image_source == "cache":
+            cached += 1
+        elif product.get("image_url"):
+            search_supplied += 1
+        else:
+            missing += 1
+
+    logger.info(
+        "🖼️ Image coverage for %s: search_supplied=%s cached=%s missing=%s total=%s",
+        context,
+        search_supplied,
+        cached,
+        missing,
+        len(products),
+    )
+
+
+def _sanitize_products_for_response(products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Strip internal-only product metadata before caching or returning responses."""
+    sanitized_products: List[Dict[str, Any]] = []
+    for product in products:
+        sanitized_product = dict(product)
+        sanitized_product.pop("_image_source", None)
+        sanitized_products.append(sanitized_product)
+    return sanitized_products
+
+
+def _strip_internal_fields_from_payload(payload: Any) -> Any:
+    """Recursively remove internal-only fields from API payloads."""
+    if isinstance(payload, dict):
+        return {
+            key: _strip_internal_fields_from_payload(value)
+            for key, value in payload.items()
+            if key != "_image_source"
+        }
+    if isinstance(payload, list):
+        return [_strip_internal_fields_from_payload(item) for item in payload]
+    return payload
 
 # Initialize services with error handling for Vercel compatibility
 try:
@@ -520,7 +566,7 @@ async def search_products(
         cached = None if refresh or not cache else await cache.get_json(cache_key)
         if cached and not refresh:
             logger.info(f"cache_hit products q='{query}'")
-            return {**cached, "cache": {"hit": True}}
+            return {**_strip_internal_fields_from_payload(cached), "cache": {"hit": True}}
         
         products = []
         partner_api_selected = False
@@ -600,13 +646,6 @@ async def search_products(
                 context=context
             )
         
-        # SMART IMAGE HANDLING: Cache lookup + Exa extraction
-        # Images are fetched using:
-        # 1. Fuzzy matching cache (FAST - DB lookup, reuses images for similar products)
-        # 2. Exa image_links (already included in search results)
-        # 3. Exa get_contents (if needed, cached for future use)
-        # This gives us images while staying fast!
-        
         # Cache all products with images for future fuzzy matching
         if products:
             try:
@@ -633,6 +672,9 @@ async def search_products(
                                 logger.debug(f"✅ Verified price for {product.get('name', 'Unknown')}: ${product['price']}")
             except Exception as e:
                 logger.warning(f"Price verification failed: {e}")
+
+        _log_image_coverage(products, f"products/search query={query!r} store={store_name or 'all'}")
+        sanitized_products = _sanitize_products_for_response(products)
         
         # Determine source for response
         source = "partner_api" if partner_api_selected else "exa_structured"
@@ -641,9 +683,9 @@ async def search_products(
             "query": query,
             "store_name": store_name or "All Stores",
             "location": zipcode or "All Locations",
-            "products_found": len(products),
+            "products_found": len(sanitized_products),
             "search_timestamp": datetime.now().isoformat(),
-            "products": products,
+            "products": sanitized_products,
             "source": source,
             "api_version": "2.0.0"
         }
@@ -1642,7 +1684,7 @@ async def aggregate_products(
                 # Apply limit if needed
                 if limit and len(enhanced_cached.get("results", [])) > limit:
                     enhanced_cached["results"] = enhanced_cached["results"][:limit]
-                return enhanced_cached
+                return _strip_internal_fields_from_payload(enhanced_cached)
 
         if not exa_client.is_available():
             raise HTTPException(
@@ -1814,232 +1856,22 @@ async def aggregate_products(
                     "zipcode": product.get("store_zipcode") or zipcode
                 })
 
+        flat_products = [product for result in store_results for product in result.get("products", [])]
+        _log_image_coverage(flat_products, f"products/aggregate query={query!r} stores={','.join(considered_store_ids)}")
         logger.info(f"📊 Grouped {len(grouped)} unique products from {total_products} total products")
 
-        # Hybrid image extraction: Exa batch + HTML scraper fallback
-        async def derive_image_from_product_url(product_url: Optional[str], exa_image: Optional[str] = None) -> Optional[str]:
-            """Derive image URL from product URL pattern (fallback method with validation)"""
-            # Priority 1: Use Exa's image field if available (most reliable)
-            if exa_image:
-                return exa_image
-            
-            if not product_url:
-                return None
-            try:
-                url = product_url.lower()
-                
-                # Target: Try different image CDN formats
-                if "target.com" in url and "/a-" in url:
-                    try:
-                        pid = product_url.split("/A-")[1].split("/")[0]
-                        # Try multiple Target image formats
-                        formats = [
-                            f"https://target.scene7.com/is/image/Target/{pid}?wid=1200&hei=1200&qlt=80&fmt=webp",
-                            f"https://target.scene7.com/is/image/Target/{pid}?wid=800&hei=800&qlt=80&fmt=webp",
-                            f"https://target.scene7.com/is/image/Target/{pid}"
-                        ]
-                        # Return first format (will validate later)
-                        return formats[0]
-                    except Exception:
-                        pass
-                
-                # Walmart: Extract product ID from URL
-                if "walmart.com" in url and "/ip/" in url:
-                    try:
-                        match = re.search(r'/ip/[^/]+/(\d+)', url)
-                        if match:
-                            product_id = match.group(1)
-                            # Try multiple Walmart CDN patterns
-                            formats = [
-                                f"https://i5.walmartimages.com/asr/{product_id}.jpeg?odnHeight=612&odnWidth=612&odnBg=FFFFFF",
-                                f"https://i5.walmartimages.com/asr/{product_id}.jpeg",
-                                f"https://i5.walmartimages.com/seo/{product_id}.jpeg"
-                            ]
-                            return formats[0]
-                    except Exception:
-                        pass
-                
-                return None
-            except Exception:
-                return None
-
-        # Collect all product URLs that need images
-        # Also filter out Wegmans logo images that might have been incorrectly set
-        urls_needing_images = []
-        url_to_offer_map = {}  # Map product_url -> list of (group_key, offer_index)
-        
         def is_wegmans_logo_image(image_url: Optional[str]) -> bool:
-            """Check if image URL is a Wegmans logo/share image"""
+            """Check if image URL is a Wegmans logo/share image."""
             if not image_url:
                 return False
             image_lower = image_url.lower()
             return 'wegmans-og-share-img' in image_lower or '53100' in image_url
-        
-        for group_key, group in grouped.items():
-            for offer_idx, offer in enumerate(group["offers"]):
-                product_url = offer.get("product_url")
-                image_url = offer.get("image_url")
-                
-                # If image is Wegmans logo, mark as needing replacement
-                if image_url and is_wegmans_logo_image(image_url):
-                    logger.debug(f"🔄 Filtering out Wegmans logo image: {image_url[:80]}...")
-                    offer["image_url"] = None  # Clear the logo image
-                
-                # For Wegmans, always fetch product pages to get real images (even if image_url exists)
-                # This ensures we get product images from the actual product page, not search results
-                is_wegmans = product_url and 'wegmans.com' in product_url.lower() and '/shop/product/' in product_url.lower()
-                
-                # Add to list if no image OR if it's a Wegmans product (to fetch from product page)
-                if product_url and (not offer.get("image_url") or is_wegmans):
-                    if product_url not in url_to_offer_map:
-                        url_to_offer_map[product_url] = []
-                        urls_needing_images.append(product_url)
-                    url_to_offer_map[product_url].append((group_key, offer_idx))
 
-        # PRIORITY 1: Use Exa-provided images (already set from search results)
-        # (Already handled - images from search are already in offers)
-
-        # PRIORITY 2: Batch Exa get_contents for missing images
-        exa_image_results = {}
-        if urls_needing_images and exa_client.is_available():
-            logger.info(f"🖼️ Fetching {len(urls_needing_images)} images via Exa batch extraction...")
-            try:
-                exa_image_results = await exa_client.get_product_images_batch(
-                    urls_needing_images,
-                    max_concurrent=5  # Rate limit Exa API calls
-                )
-                logger.info(f"✅ Exa batch extraction complete: {sum(1 for v in exa_image_results.values() if v)}/{len(exa_image_results)} images found")
-            except Exception as e:
-                logger.warning(f"⚠️ Exa batch image extraction failed: {e}")
-
-        # Update offers with Exa images
-        for product_url, image_url in exa_image_results.items():
-            if image_url and product_url in url_to_offer_map:
-                for group_key, offer_idx in url_to_offer_map[product_url]:
-                    grouped[group_key]["offers"][offer_idx]["image_url"] = image_url
-
-        # PRIORITY 3: AI scraper for Wegmans products (more reliable than HTML parsing)
-        remaining_urls = [url for url in urls_needing_images if url not in exa_image_results or not exa_image_results[url]]
-        ai_image_results = {}
-        wegmans_urls = [url for url in remaining_urls if 'wegmans.com' in url.lower() and '/shop/product/' in url.lower()]
-        
-        # Always try AI scraper first if available, but don't block if it's not
-        if wegmans_urls and ai_scraper.is_available():
-            logger.info(f"🤖 Using AI scraper to extract images from {len(wegmans_urls)} Wegmans product pages...")
-            try:
-                async def extract_with_ai(url: str):
-                    try:
-                        data = await ai_scraper.extract_product_data(url, store_name="Wegmans")
-                        image_url = data.get("image_url")
-                        if image_url:
-                            logger.debug(f"✅ AI extracted image for {url[:60]}...: {image_url[:80]}...")
-                        return image_url
-                    except Exception as e:
-                        logger.debug(f"AI extraction failed for {url}: {e}")
-                        return None
-                
-                # Process Wegmans URLs with AI scraper (limit concurrent to avoid rate limits)
-                semaphore = asyncio.Semaphore(3)
-                async def process_wegmans_url(url: str):
-                    async with semaphore:
-                        image_url = await extract_with_ai(url)
-                        if image_url:
-                            ai_image_results[url] = image_url
-                
-                await asyncio.gather(*[process_wegmans_url(url) for url in wegmans_urls[:10]])  # Limit to 10
-                logger.info(f"✅ AI scraper complete: {sum(1 for v in ai_image_results.values() if v)}/{len(ai_image_results)} images found")
-            except Exception as e:
-                logger.warning(f"⚠️ AI image extraction failed: {e}")
-        elif wegmans_urls:
-            logger.info(f"⚠️ AI scraper not available (no API keys), will use HTML scraper for {len(wegmans_urls)} Wegmans URLs")
-        
-        # Update offers with AI scraper images
-        for product_url, image_url in ai_image_results.items():
-            if image_url and product_url in url_to_offer_map:
-                # Filter out Wegmans logos (AI should handle this, but double-check)
-                if 'wegmans-og-share-img' not in image_url.lower() and '53100' not in image_url:
-                    for group_key, offer_idx in url_to_offer_map[product_url]:
-                        grouped[group_key]["offers"][offer_idx]["image_url"] = image_url
-                        logger.debug(f"✅ Updated offer image from AI scraper: {image_url[:80]}...")
-                else:
-                    logger.debug(f"🔄 Filtered out Wegmans logo from AI scraper: {image_url[:80]}...")
-        
-        # PRIORITY 4: HTML scraper for remaining missing images (non-Wegmans or fallback)
-        # Also include Wegmans URLs that didn't get AI extraction (fallback)
-        remaining_urls = [url for url in remaining_urls if url not in ai_image_results or not ai_image_results[url]]
-        # Also add ALL Wegmans URLs that need images (even if AI was attempted)
-        wegmans_urls_for_html = [url for url in urls_needing_images if 'wegmans.com' in url.lower() and '/shop/product/' in url.lower() and (url not in ai_image_results or not ai_image_results[url])]
-        remaining_urls = list(set(remaining_urls + wegmans_urls_for_html))
-        
-        logger.info(f"📋 Image extraction status: Exa={len(exa_image_results)}, AI={len(ai_image_results)}, Remaining={len(remaining_urls)} (Wegmans={len(wegmans_urls_for_html)})")
-        
-        html_image_results = {}
-        if remaining_urls:
-            logger.info(f"🖼️ Fetching {len(remaining_urls)} images via HTML scraper (including {len(wegmans_urls_for_html)} Wegmans URLs)...")
-            logger.info(f"📋 Sample URLs: {remaining_urls[:2]}")
-            try:
-                async with HTMLImageExtractor() as html_extractor:
-                    html_image_results = await html_extractor.extract_images_batch(
-                        remaining_urls,
-                        max_concurrent=10  # Can do more concurrent requests with direct HTML scraping
-                    )
-                found_count = sum(1 for v in html_image_results.values() if v)
-                logger.info(f"✅ HTML scraper complete: {found_count}/{len(html_image_results)} images found")
-                # Log Wegmans-specific results
-                wegmans_html_results = {url: img for url, img in html_image_results.items() if 'wegmans.com' in url.lower()}
-                if wegmans_html_results:
-                    wegmans_found = sum(1 for v in wegmans_html_results.values() if v)
-                    logger.info(f"✅ Wegmans HTML extraction: {wegmans_found}/{len(wegmans_html_results)} images found")
-                    # Log specific results
-                    for url, img in list(wegmans_html_results.items())[:3]:
-                        if img:
-                            logger.info(f"  ✅ {url[:60]}... -> {img[:80]}...")
-                        else:
-                            logger.warning(f"  ❌ {url[:60]}... -> No image found")
-            except Exception as e:
-                logger.error(f"⚠️ HTML image extraction failed: {e}", exc_info=True)
-
-        # Update offers with HTML scraper images
-        for product_url, image_url in html_image_results.items():
-            if image_url and product_url in url_to_offer_map:
-                # Filter out Wegmans logos
-                if 'wegmans-og-share-img' not in image_url.lower() and '53100' not in image_url:
-                    for group_key, offer_idx in url_to_offer_map[product_url]:
-                        grouped[group_key]["offers"][offer_idx]["image_url"] = image_url
-                        logger.info(f"✅ Updated offer image from HTML scraper for {product_url[:60]}...: {image_url[:80]}...")
-                else:
-                    logger.debug(f"🔄 Filtered out Wegmans logo from HTML scraper: {image_url[:80]}...")
-
-        # PRIORITY 5: URL pattern matching with validation (last resort)
-        remaining_urls = [url for url in remaining_urls if url not in html_image_results or not html_image_results[url]]
-        if remaining_urls:
-            logger.info(f"🖼️ Trying URL pattern matching for {len(remaining_urls)} products...")
-            # Use aiohttp for validation
-            import aiohttp
-            async with aiohttp.ClientSession() as session:
-                async def validate_derived_image(url: str) -> Optional[str]:
-                    derived = await derive_image_from_product_url(url)
-                    if derived:
-                        # Validate the derived URL
-                        try:
-                            async with session.head(derived, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=5)) as response:
-                                if response.status == 200:
-                                    content_type = response.headers.get('Content-Type', '').lower()
-                                    if content_type.startswith('image/') or any(ext in derived.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']):
-                                        return derived
-                        except Exception:
-                            pass
-                    return None
-                
-                semaphore = asyncio.Semaphore(10)
-                async def process_url(url: str):
-                    async with semaphore:
-                        validated = await validate_derived_image(url)
-                        if validated and url in url_to_offer_map:
-                            for group_key, offer_idx in url_to_offer_map[url]:
-                                grouped[group_key]["offers"][offer_idx]["image_url"] = validated
-                
-                await asyncio.gather(*[process_url(url) for url in remaining_urls])
+        for group in grouped.values():
+            for offer in group["offers"]:
+                if is_wegmans_logo_image(offer.get("image_url")):
+                    logger.debug(f"🔄 Filtering out Wegmans logo image: {offer['image_url'][:80]}...")
+                    offer["image_url"] = None
 
         # Final enrichment: collect all images and update canonical products
         async def enrich_group_final(group: Dict[str, Any]) -> None:
@@ -2468,6 +2300,7 @@ async def aggregate_products(
         # Apply limit to results
         if limit and len(enhanced_response.get("results", [])) > limit:
             enhanced_response["results"] = enhanced_response["results"][:limit]
+        enhanced_response = _strip_internal_fields_from_payload(enhanced_response)
 
         # Cache the results (store enhanced format for future use)
         logger.info(f"cache_miss aggregate zip={zipcode} q='{query}' -> setting cache")
